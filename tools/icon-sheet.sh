@@ -45,9 +45,9 @@ render_theme() {
         local stem
         stem="$(basename "$source" .svg)"
         local staged="$OUT_DIR/${stem}-${name}.svg"
-        # Substitute currentColor for a concrete colour; a symbolic icon that
-        # still renders black afterwards has a hardcoded fill.
-        sed "s/currentColor/${fg}/g" "$source" > "$staged"
+        # Substitute the canonical symbolic grey for the sheet's foreground, so
+        # the contact sheet shows what GTK would recolour it to.
+        sed "s/#bebebe/${fg}/g" "$source" > "$staged"
         rsvg-convert -w 64 -h 64 "$staged" -o "$OUT_DIR/${stem}-${name}.png"
         tiles+=("$OUT_DIR/${stem}-${name}.png")
         count=$((count + 1))
