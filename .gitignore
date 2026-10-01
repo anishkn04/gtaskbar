@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local OAuth credentials. Never commit these: create your own Desktop-app
+# OAuth client at https://console.cloud.google.com and drop the JSON here.
+client_secret_*.json
+.env
+.env.local
+
+# GResource build output
+*.gresource
+
+# Editors / tooling
+.idea/
+.vscode/
+*.swp
+.fleet/

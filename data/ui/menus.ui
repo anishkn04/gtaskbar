@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <menu id="main-menu">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Add Task</attribute>
+        <attribute name="action">app.add-task</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Search</attribute>
+        <attribute name="action">win.search</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Sync Now</attribute>
+        <attribute name="action">app.sync-now</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Preferences</attribute>
+        <attribute name="action">app.preferences</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Keyboard Shortcuts</attribute>
+        <attribute name="action">win.show-help-overlay</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_About GTaskbar</attribute>
+        <attribute name="action">app.about</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Quit</attribute>
+        <attribute name="action">app.quit</attribute>
+      </item>
+    </section>
+  </menu>
+
+  <menu id="tray-menu">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Add Task</attribute>
+        <attribute name="action">app.add-task</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Sync Now</attribute>
+        <attribute name="action">app.sync-now</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Open GTaskbar</attribute>
+        <attribute name="action">app.show-window</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Quit</attribute>
+        <attribute name="action">app.quit</attribute>
+      </item>
+    </section>
+  </menu>
+
+  <menu id="task-context-menu">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Edit</attribute>
+        <attribute name="action">task.edit</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Mark _Complete</attribute>
+        <attribute name="action">task.toggle-complete</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Set Due Date</attribute>
+        <attribute name="action">task.set-due</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Clear Due Date</attribute>
+        <attribute name="action">task.clear-due</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Delete</attribute>
+        <attribute name="action">task.delete</attribute>
+      </item>
+    </section>
+  </menu>
+</interface>

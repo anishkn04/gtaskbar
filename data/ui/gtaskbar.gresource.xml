@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/dev/anishkn04/gtaskbar">
+    <file compressed="true" alias="ui/style.css">ui/style.css</file>
+    <file compressed="true" preprocess="xml-stripblanks">ui/menus.ui</file>
+  </gresource>
+  <gresource prefix="/dev/anishkn04/gtaskbar/icons/scalable/apps">
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar.svg">../icons/scalable/apps/gtaskbar.svg</file>
+  </gresource>
+  <gresource prefix="/dev/anishkn04/gtaskbar/icons/symbolic/apps">
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-symbolic.svg">../icons/symbolic/apps/gtaskbar-symbolic.svg</file>
+  </gresource>
+</gresources>

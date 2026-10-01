@@ -1,0 +1,63 @@
+/*
+ * gtaskbar application styles.
+ *
+ * Colour policy: never hardcode a palette. Every colour below resolves to a
+ * libadwaita named colour, which in turn falls back to the system GTK theme.
+ * That means the app follows whatever the desktop shell is already using,
+ * including shells that inject their own palette via ~/.config/gtk-4.0/*.css.
+ */
+
+@define-color overdue_color @destructive_color;
+@define-color today_color @warning_color;
+
+/* Completed tasks: recede without becoming unreadable. */
+.gtaskbar-task-row.done .gtaskbar-task-title {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+/* Task titles wrap rather than truncate; three lines is the practical cap for
+ * a sidebar-sized pane, but the main list view has room for more. */
+.gtaskbar-task-title {
+  font-weight: 400;
+}
+
+.gtaskbar-task-subtitle {
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+
+.gtaskbar-task-subtitle.overdue {
+  color: @overdue_color;
+  font-weight: 700;
+  opacity: 1;
+}
+
+.gtaskbar-task-subtitle.today {
+  color: @today_color;
+  font-weight: 700;
+  opacity: 1;
+}
+
+/* Quick-add row sits flush against the list with no gap. */
+.gtaskbar-quick-add {
+  border-bottom: 1px solid alpha(currentColor, 0.1);
+}
+
+/* Group headers inside the task list. */
+.gtaskbar-group-header {
+  font-size: 0.8em;
+  font-weight: 700;
+  opacity: 0.55;
+  padding: 6px 12px 2px 12px;
+}
+
+/* Subtasks are visually indented, matching Google Tasks' own hierarchy. */
+.gtaskbar-subtask {
+  padding-left: 24px;
+}
+
+/* Tray popover keeps a comfortable minimum tap-target height. */
+.gtaskbar-tray-list row {
+  padding: 6px 10px;
+}

@@ -1,0 +1,66 @@
+[package]
+name = "gtaskbar"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A native, tray-first Google Tasks client for Linux built with GTK4 and libadwaita"
+license = "MIT"
+repository = "https://github.com/anishkn04/gtaskbar"
+homepage = "https://github.com/anishkn04/gtaskbar"
+readme = "README.md"
+keywords = ["google-tasks", "gtk4", "libadwaita", "todo", "linux"]
+categories = ["gui", "productivity"]
+
+[package.metadata.deb]
+fullname = "GTaskbar"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_20"] }
+gdk = { package = "gdk4", version = "0.11" }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_9"] }
+glib = "0.22"
+gio = "0.22"
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+dirs = "7"
+toml = "1"
+
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
+
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls",
+    "http2",
+    "gzip",
+] }
+oauth2 = { version = "5", default-features = false, features = [
+    "rustls-tls",
+    "pkce-plain",
+] }
+keyring = "4"
+base64 = "0.23"
+url = "2"
+sha2 = "0.11"
+
+chrono = { version = "0.4", features = ["serde"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.3"
+
+[build-dependencies]
+glib-build-tools = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
+codegen-units = 1
+panic = "abort"
