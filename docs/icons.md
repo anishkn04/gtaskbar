@@ -70,3 +70,38 @@ symbolic icon to the current foreground — the same convention
 The interface icons come from `adwaita-icon-theme`, which is a hard runtime
 dependency and is pulled in by GTK itself. It is not listed in the dependency
 notes beyond that because there is nothing to install beyond the toolkit.
+
+## Known issue: `image-missing` placeholders on entry rows
+
+`AdwEntryRow` and `AdwPasswordEntryRow` render GTK's `image-missing`
+placeholder — a white page with a folded corner — instead of their own
+affordances, on systems where:
+
+```
+libadwaita           1.9.4
+adwaita-icon-theme   50.0
+```
+
+libadwaita 1.9 asks GTK for icon names that adwaita-icon-theme 50 does not
+ship, including `caps-lock-symbolic` and the whole `adw-*-symbolic` family, and
+libadwaita bundles no fallback assets of its own. GTK falls back to
+`image-missing` for each one.
+
+This is a distribution packaging gap rather than an app defect: it affects any
+libadwaita application that uses an entry row, and both packages are already at
+the newest version in the repository, so there is no update that resolves it.
+
+The affected widgets in gtaskbar are the quick-add row and the two credential
+fields in the connect dialog. If a future libadwaita or icon theme closes the
+gap, this section can be deleted.
+
+To check whether it is present on a given system:
+
+```sh
+pacman -Q libadwaita adwaita-icon-theme
+# then, for the icons libadwaita asks for:
+strings /usr/lib/libadwaita-1.so.0 | grep -oE '^[a-z0-9-]+-symbolic$' | sort -u
+```
+
+Every name that command prints should resolve under
+`/usr/share/icons/Adwaita/symbolic/`. The ones that do not are the culprit.
