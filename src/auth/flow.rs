@@ -336,6 +336,38 @@ mod tests {
         );
     }
 
+    /// `finish` runs inside the Tokio runtime driving the authorisation, and a
+    /// keyring read builds and `block_on`s a runtime of its own, which aborts
+    /// the process when entered from inside one. The credentials must therefore
+    /// be read once, at `begin` on the main thread, and travel on `Pending`.
+    /// This pins that shape: `finish` takes them off the request and must not
+    /// reach for the keyring itself.
+    #[test]
+    fn finish_takes_credentials_off_the_request_rather_than_the_keyring() {
+        let source = include_str!("flow.rs");
+        let start = source
+            .find("pub async fn finish")
+            .expect("finish must exist");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("finish must end at column zero");
+        let body = &body[..end];
+
+        for forbidden in [
+            "ClientCredentials::load",
+            "credentials::refresh_token",
+            "credentials::store_refresh_token",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "finish() reaches for the keyring via {forbidden}, which aborts the process                  from inside the authorisation runtime; take it off Pending instead"
+            );
+        }
+        assert!(
+            body.contains("pending.credentials"),
+            "finish() must use the credentials carried on Pending"
+        );
+    }
+
     #[test]
     fn a_token_error_is_surfaced_rather_than_swallowed() {
         // A body carrying `error` must not be read as a successful exchange with
