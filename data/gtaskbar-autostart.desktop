@@ -3,7 +3,9 @@ Type=Application
 Name=GTaskbar
 GenericName=Google Tasks Client
 Comment=A native, tray-first Google Tasks client for Linux
-Exec=gtaskbar --hidden
+# @bindir@ is replaced with the real install directory by install.sh; see
+# data/gtaskbar.desktop for why this cannot be a bare command name.
+Exec=@bindir@/gtaskbar --hidden
 Icon=gtaskbar
 Terminal=false
 Categories=GNOME;GTK;Utility;

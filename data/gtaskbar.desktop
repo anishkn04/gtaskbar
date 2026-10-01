@@ -3,10 +3,16 @@ Type=Application
 Name=GTaskbar
 GenericName=Google Tasks Client
 Comment=A native, tray-first Google Tasks client for Linux
-# No %U: the app has no MimeType and no HANDLES_OPEN flag, so GIO treats any
-# argument as a file to open and exits 1 with "This application can not open
-# files". The app takes no arguments.
-Exec=gtaskbar
+# @bindir@ is replaced with the real install directory by install.sh.
+#
+# The path has to be absolute. The spec resolves a bare command name through
+# $PATH, and ~/.local/bin is not on the PATH of the graphical session, only of
+# an interactive shell, so "gtaskbar" here failed to exec from the app picker
+# and from XDG autostart with no error at all.
+#
+# No %U either: the app has no MimeType and no HANDLES_OPEN flag, so GIO would
+# treat the substituted URL as a file to open and exit 1.
+Exec=@bindir@/gtaskbar
 Icon=gtaskbar
 Terminal=false
 Categories=GNOME;GTK;Utility;

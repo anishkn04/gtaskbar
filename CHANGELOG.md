@@ -81,6 +81,16 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
   flag is declared. A hidden start also needs an explicit `hold`, since
   GApplication ends `run` as soon as there is no window and the process would
   otherwise exit straight after starting.
+- **The app could not be launched from the app picker or started at login, at
+  all.** Both desktop entries used a bare `Exec=gtaskbar`, which the spec
+  resolves through `$PATH`. `~/.local/bin` is on the `PATH` of an interactive
+  shell but not of a graphical session, so Noctalia's exec failed with ENOENT and
+  reported nothing, and XDG autostart resolved it the same way, so the app never
+  started at login and no tray icon appeared. `install.sh` now substitutes an
+  absolute path into both entries and refuses to install one that does not end up
+  absolute and executable. The release tarball carries `install.sh` and no longer
+  documents a hand-written `install` of the desktop file, which could not
+  substitute the placeholder and is where the bare name came from.
 - **Both entries dropped `%U` from `Exec`.** The app declares no `MimeType` and
   does not set `HANDLES_OPEN`, so GIO treats the substituted URL as a file to
   open and aborts with "This application can not open files".

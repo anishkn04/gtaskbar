@@ -48,9 +48,12 @@ jobs:
           mkdir -p "$staging"
 
           cp target/release/gtaskbar "$staging/"
-          cp data/gtaskbar.desktop "$staging/"
-          cp data/icons/scalable/apps/gtaskbar.svg "$staging/"
-          cp data/icons/symbolic/apps/gtaskbar-symbolic.svg "$staging/"
+          cp install.sh "$staging/"
+          # install.sh needs data/ to install the desktop entries and icons, and
+          # it is the only supported install path: it substitutes the real
+          # install directory into Exec, which a hand-written install of the
+          # desktop file cannot do.
+          cp -r data "$staging/"
           cp README.md LICENSE CHANGELOG.md "$staging/"
 
           tar -czf "$staging.tar.gz" "$staging"
@@ -80,11 +83,11 @@ jobs:
             ./install.sh --no-build
             ```
 
-            Or install the binary directly:
-
-            ```sh
-            install -Dm755 gtaskbar ~/.local/bin/gtaskbar
-            install -Dm644 gtaskbar.desktop ~/.local/share/applications/gtaskbar.desktop
-            ```
+            Use `./install.sh --no-build`, not a manual `install` of the desktop
+            file: `Exec` carries a `@bindir@` placeholder that the script
+            replaces with the real install directory. A bare `gtaskbar` in
+            `Exec` resolves through the session's `PATH`, which does not include
+            `~/.local/bin`, so the entry would fail to start from the app picker
+            and from autostart without reporting an error.
 
             Requires GTK 4.14+ and libadwaita 1.4+.

@@ -53,6 +53,13 @@ cd gtaskbar
 This builds a release binary and installs it into `~/.local`, along with the
 desktop entry, icons and an autostart entry. No root is required.
 
+The installed desktop entries get an absolute `Exec` path rather than a bare
+`gtaskbar`. A bare name is resolved through the session's `PATH`, and
+`~/.local/bin` is only on the `PATH` of an interactive shell, not of a graphical
+session, so a bare name fails to start from the app picker and from autostart
+without reporting anything. If you move the binary, re-run `./install.sh` so the
+entries are rewritten.
+
 To remove it again:
 
 ```sh

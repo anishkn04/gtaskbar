@@ -286,15 +286,93 @@ mod desktop_entry_tests {
         assert_eq!(key(&contents, "Type"), Some("Application"));
     }
 
+    fn install_script() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("could not read {}: {err}", path.display()))
+    }
+
+    /// Both entries used `Exec=gtaskbar`, a bare name that the spec resolves
+    /// through `$PATH`. `~/.local/bin` is not on a graphical session's `PATH`
+    /// the way it is in an interactive shell, and Qt launchers do not fall back
+    /// to it the way GIO does, so the entry exec'd nothing and the launcher
+    /// reported nothing. The same resolution applies to XDG autostart, so the
+    /// app also never started at login. An absolute path is the only form every
+    /// launcher agrees on, and the install directory is only known at install
+    /// time, so it is a placeholder until then.
     #[test]
-    fn both_entries_run_the_installed_binary() {
+    fn both_entries_exec_a_placeholder_that_installs_to_an_absolute_path() {
         for name in ["gtaskbar.desktop", "gtaskbar-autostart.desktop"] {
             let exec = exec_line(name);
             assert_eq!(
                 exec.split_whitespace().next(),
-                Some("gtaskbar"),
-                "{name} should exec the bare binary name, which is what install.sh puts on PATH",
+                Some("@bindir@/gtaskbar"),
+                "{name} must exec @bindir@/gtaskbar, the only form that does not depend on PATH",
             );
         }
+    }
+
+    /// Guards against the placeholder being dropped or renamed on one side only,
+    /// which would leave an entry that either cannot start or starts the wrong
+    /// binary. Both entries have to go through the same substitution.
+    #[test]
+    fn install_script_substitutes_the_placeholder_for_both_entries() {
+        let script = install_script();
+        assert!(
+            script.contains("s|@bindir@|$BIN_DIR|g"),
+            "install.sh no longer substitutes @bindir@, so the entries would never become runnable",
+        );
+        assert_eq!(
+            script.matches("install_desktop_entry \"").count(),
+            2,
+            "both the launcher entry and the autostart entry must be installed through the \
+             substituting helper, or one of them keeps the raw placeholder",
+        );
+    }
+
+    /// A leftover or misspelled placeholder, or an `Exec` that is still not an
+    /// absolute path, reproduces the silent no-start failure, so install.sh
+    /// checks for both rather than shipping an entry that cannot launch.
+    #[test]
+    fn install_script_refuses_to_install_an_unusable_exec() {
+        let script = install_script();
+        assert!(
+            script.contains("grep -q '@bindir@'"),
+            "install.sh must abort if the placeholder survives substitution",
+        );
+        assert!(
+            script.contains("!= /* || ! -x"),
+            "install.sh must abort if the substituted Exec is not an executable absolute path",
+        );
+    }
+
+    /// The release tarball told people to install the desktop file by hand,
+    /// which cannot substitute the placeholder, and is why the bare name was
+    /// there in the first place. The tarball now carries install.sh, and
+    /// install.sh accepts a binary sitting next to it rather than only in
+    /// target/release, which is the tarball's layout.
+    #[test]
+    fn the_release_tarball_ships_the_installer_rather_than_a_manual_recipe() {
+        let workflow = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"),
+        )
+        .expect("could not read the release workflow");
+
+        assert!(
+            workflow.contains("cp install.sh \"$staging/\""),
+            "the tarball must ship install.sh, the only install path that substitutes Exec",
+        );
+        assert!(
+            !workflow.contains("install -Dm644 gtaskbar.desktop"),
+            "the release notes still tell people to install the desktop file by hand, which \
+             leaves the @bindir@ placeholder unsubstituted",
+        );
+
+        let script = install_script();
+        assert!(
+            script.contains("\"$SCRIPT_DIR/$BIN_NAME\""),
+            "install.sh must accept the tarball's flat layout, or the shipped installer fails \
+             for exactly the people it was packaged for",
+        );
     }
 }

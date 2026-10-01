@@ -75,10 +75,18 @@ if [[ $BUILD -eq 1 ]]; then
 fi
 
 SOURCE_BIN="$SCRIPT_DIR/target/release/$BIN_NAME"
+# The release tarball ships the binary next to this script rather than in a
+# target directory, so accept that layout too. It matters because the tarball is
+# how people install without a Rust toolchain, and a second, hand-written
+# install recipe is exactly how the bare-name Exec below came about.
 if [[ ! -x "$SOURCE_BIN" ]]; then
-    echo "error: $SOURCE_BIN not found or not executable." >&2
-    echo "Run without --no-build to build it." >&2
-    exit 1
+    if [[ -x "$SCRIPT_DIR/$BIN_NAME" ]]; then
+        SOURCE_BIN="$SCRIPT_DIR/$BIN_NAME"
+    else
+        echo "error: no $BIN_NAME binary found (looked in $SCRIPT_DIR/target/release and $SCRIPT_DIR)." >&2
+        echo "Run without --no-build to build it." >&2
+        exit 1
+    fi
 fi
 
 echo "==> Installing to $PREFIX"
@@ -95,8 +103,42 @@ for icon in "$SCRIPT_DIR/data/icons/symbolic/apps/$BIN_NAME"*.svg; do
     install -Dm644 "$icon" "$ICON_SYMBOLIC/$(basename "$icon")"
 done
 
-install -Dm644 "$SCRIPT_DIR/data/$BIN_NAME.desktop" "$APP_DIR/$BIN_NAME.desktop"
-install -Dm644 "$SCRIPT_DIR/data/$BIN_NAME-autostart.desktop" "$AUTOSTART_DIR/$BIN_NAME.desktop"
+# Install a desktop entry with @bindir@ replaced by the real install directory.
+#
+# A bare command name in Exec is resolved through $PATH, and ~/.local/bin is not
+# on the PATH of the graphical session the way it is in an interactive shell.
+# Qt-based launchers do not fall back to ~/.local/bin the way GIO does, so the
+# entry exec'd nothing and the launcher reported nothing: the app simply appeared
+# to be broken. XDG autostart resolved it the same way, so the app did not start
+# at login either. An absolute path is the only form every launcher agrees on.
+install_desktop_entry() {
+    local src="$1" dest="$2" staged
+    staged="$(mktemp)"
+
+    sed "s|@bindir@|$BIN_DIR|g" "$src" >"$staged"
+
+    # Fail here rather than shipping an entry that silently cannot start. A
+    # leftover placeholder, or an Exec that is still not absolute, reproduces the
+    # exact silent failure this function exists to prevent.
+    if grep -q '@bindir@' "$staged"; then
+        echo "error: $src still contains @bindir@ after substitution." >&2
+        rm -f "$staged"
+        exit 1
+    fi
+    local exec_line
+    exec_line="$(grep -m1 '^Exec=' "$staged" | cut -d= -f2- | awk '{print $1}')"
+    if [[ "$exec_line" != /* || ! -x "$exec_line" ]]; then
+        echo "error: $src installs an Exec that is not an executable absolute path: '$exec_line'" >&2
+        rm -f "$staged"
+        exit 1
+    fi
+
+    install -Dm644 "$staged" "$dest"
+    rm -f "$staged"
+}
+
+install_desktop_entry "$SCRIPT_DIR/data/$BIN_NAME.desktop" "$APP_DIR/$BIN_NAME.desktop"
+install_desktop_entry "$SCRIPT_DIR/data/$BIN_NAME-autostart.desktop" "$AUTOSTART_DIR/$BIN_NAME.desktop"
 
 # Mark the app as untrusted in the autostart launcher so it can start without
 # the "untrusted desktop launcher" prompt on GNOME.
@@ -114,7 +156,9 @@ echo
 echo "Installed $BIN_NAME to $BIN_DIR/$BIN_NAME"
 echo
 echo "Next steps:"
-echo "  1. Launch it:            $BIN_NAME"
+echo "  1. Launch it:            $BIN_DIR/$BIN_NAME"
+echo "     The absolute path matters: a graphical session's PATH usually does not"
+echo "     include $BIN_DIR, so a bare '$BIN_NAME' will not start from a launcher."
 echo "  2. Create an OAuth client at https://console.cloud.google.com:"
 echo "     - enable the Google Tasks API"
 echo "     - OAuth consent screen -> External, add yourself as a test user"
