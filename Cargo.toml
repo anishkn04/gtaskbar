@@ -15,7 +15,13 @@ categories = ["gui", "productivity"]
 fullname = "GTaskbar"
 
 [dependencies]
-gtk = { package = "gtk4", version = "0.11", features = ["v4_20"] }
+# No version feature is enabled: gdk4-sys would then require that GTK version at
+# build time, which is stricter than the app actually needs. The only 4.4+ API in
+# use is MenuButton's `primary`, which is set via the `primary` property instead
+# of the builder method, so the crate feature is unnecessary. This keeps the
+# build working on distributions still shipping GTK 4.14, such as Ubuntu 24.04.
+gtk = { package = "gtk4", version = "0.11" }
+glue = "0.1"
 gdk = { package = "gdk4", version = "0.11" }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_9"] }
 glib = "0.22"
@@ -32,8 +38,10 @@ toml = "1"
 
 rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 
+tokio = { version = "1", features = ["rt"] }
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
+    "query",
     "rustls",
     "http2",
     "gzip",

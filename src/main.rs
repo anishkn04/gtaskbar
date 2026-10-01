@@ -1,3 +1,5 @@
+mod api;
+mod auth;
 mod config;
 mod store;
 mod sync;
@@ -76,11 +78,40 @@ pub fn register_actions(app: &adw::Application) {
         .activate(|app: &adw::Application, _, _| ui::window::present(app))
         .build();
 
+    let connect = gio::ActionEntry::builder("connect-account")
+        .activate(|app: &adw::Application, _, _| {
+            if let Some(window) = app
+                .windows()
+                .first()
+                .and_then(|w| w.downcast_ref::<adw::ApplicationWindow>())
+            {
+                ui::connect::present_for(window.upcast_ref());
+            }
+        })
+        .build();
+
+    let disconnect = gio::ActionEntry::builder("disconnect-account")
+        .activate(|app: &adw::Application, _, _| {
+            auth::session::clear();
+            log::info!("disconnected; cached tasks left in place until the next clear");
+            ui::window::rebuild(app);
+        })
+        .build();
+
     let preferences = gio::ActionEntry::builder("preferences")
         .activate(|app: &adw::Application, _, _| ui::settings::present(app))
         .build();
 
-    app.add_action_entries([quit, about, sync_now, add_task, show_window, preferences]);
+    app.add_action_entries([
+        quit,
+        about,
+        sync_now,
+        add_task,
+        show_window,
+        connect,
+        disconnect,
+        preferences,
+    ]);
 }
 
 fn about_dialog() -> adw::AboutDialog {

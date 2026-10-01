@@ -271,6 +271,36 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Re-keys a task after the server assigns a real id to what was a local
+    /// placeholder.
+    ///
+    /// Used by the insert replay path: the UI creates an optimistic task with a
+    /// synthetic id, and once the server responds the placeholder has to be
+    /// swapped for the real thing, including any queued operations that
+    /// referenced it.
+    pub fn reassign_task_id(&self, list_id: &str, from: &str, to: &str) -> Result<()> {
+        if from == to {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE OR REPLACE tasks SET id = ?3 WHERE list_id = ?1 AND id = ?2",
+            params![list_id, from, to],
+        )?;
+        // Point any queued follow-up writes at the real id, so a
+        // create-then-rename while offline does not orphan the rename.
+        tx.execute(
+            "UPDATE pending_ops SET task_id = ?3 WHERE list_id = ?1 AND task_id = ?2",
+            params![list_id, from, to],
+        )?;
+        tx.execute(
+            "UPDATE notified SET task_id = ?3 WHERE list_id = ?1 AND task_id = ?2",
+            params![list_id, from, to],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Removes a task and records a tombstone, so a later full sync does not
     /// resurrect it from the server copy we are about to keep.
     pub fn delete_task(&self, list_id: &str, task_id: &str) -> Result<()> {

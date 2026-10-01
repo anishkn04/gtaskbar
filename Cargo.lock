@@ -1115,6 +1115,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glue"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64aba654774c988c8d521ff8a511da5fe7af5be56eef9d4fd4dd491e1ddfeae5"
+
+[[package]]
 name = "gobject-sys"
 version = "0.22.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1190,6 +1196,7 @@ dependencies = [
  "gio",
  "glib",
  "glib-build-tools",
+ "glue",
  "gtk4",
  "keyring",
  "ksni",
@@ -1203,6 +1210,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "toml",
  "url",
 ]
@@ -2359,6 +2367,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

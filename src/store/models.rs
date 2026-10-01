@@ -59,7 +59,7 @@ pub struct Task {
 /// "leave the due date alone" and the field is omitted from the request;
 /// `Some(None)` means "clear the due date" and serialises to an explicit
 /// `null`. Collapsing this to a plain `Option` would make clearing impossible.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
