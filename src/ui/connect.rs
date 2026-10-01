@@ -1,6 +1,7 @@
 use adw::prelude::*;
 
 use super::icons;
+use crate::auth::credentials::ClientCredentials;
 use crate::config::Config;
 
 /// First-run account connection.
@@ -89,7 +90,9 @@ pub fn present_for(parent: &gtk::Window) {
     // Deliberately empty: a real client id must never be baked into the source.
     // `GTASKBAR_CLIENT_ID` / `GTASKBAR_CLIENT_SECRET` prefill these for local
     // development, and the OAuth step will persist what is entered here.
-    let (env_id, env_secret) = credentials_from_env().unwrap_or_default();
+    let (env_id, env_secret) = credentials_from_env()
+        .map(|credentials| (credentials.client_id, credentials.client_secret))
+        .unwrap_or_default();
 
     let client_id = adw::EntryRow::builder()
         .title("Client ID")
@@ -309,57 +312,80 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 }
 
 /// Reads client credentials from the environment, for development.
+pub fn credentials_from_env() -> Option<ClientCredentials> {
+    credentials_from(
+        std::env::var("GTASKBAR_CLIENT_ID").ok(),
+        std::env::var("GTASKBAR_CLIENT_SECRET").ok(),
+    )
+}
+
+/// The credential rules, as a pure function.
 ///
-/// Returns `None` unless both variables are set: a client id without a secret
-/// would fail at the token exchange, which is a confusing way to find out.
-pub fn credentials_from_env() -> Option<(String, String)> {
-    let id = std::env::var("GTASKBAR_CLIENT_ID").ok()?;
-    let secret = std::env::var("GTASKBAR_CLIENT_SECRET").ok()?;
+/// Split out from `credentials_from_env` so the rules are testable without
+/// touching the process environment, which is shared state: a test that called
+/// `set_var` would race every other test in the binary, and would also wipe the
+/// developer's real credentials when they run the suite with `.env` loaded.
+fn credentials_from(id: Option<String>, secret: Option<String>) -> Option<ClientCredentials> {
+    let id = id?;
+    let secret = secret?;
     if id.trim().is_empty() || secret.trim().is_empty() {
         return None;
     }
-    Some((id, secret))
+    Some(ClientCredentials {
+        client_id: id,
+        client_secret: secret,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::credentials_from_env;
 
     // These tests mutate process-wide environment, so they are combined into
     // one test to keep them from interfering if the suite ever runs in
     // parallel.
 
+    use super::credentials_from;
+
     #[test]
-    fn env_credentials_require_both_variables() {
-        // SAFETY: single-threaded within this test binary for this test; the
-        // variables are restored before returning.
-        unsafe {
-            std::env::remove_var("GTASKBAR_CLIENT_ID");
-            std::env::remove_var("GTASKBAR_CLIENT_SECRET");
-        }
+    fn credentials_need_both_variables() {
         assert!(
-            credentials_from_env().is_none(),
-            "no credentials should be reported when unset"
+            credentials_from(None, None).is_none(),
+            "neither variable set is not connected"
         );
-
-        unsafe {
-            std::env::set_var("GTASKBAR_CLIENT_ID", "id.apps.googleusercontent.com");
-        }
         assert!(
-            credentials_from_env().is_none(),
-            "a client id without a secret is not usable"
+            credentials_from(Some("id".into()), None).is_none(),
+            "a client id without a secret would fail at the token exchange, which is a
+             confusing way to find out, so it is rejected here instead"
         );
+        assert!(
+            credentials_from(None, Some("secret".into())).is_none(),
+            "a secret without a client id identifies nothing"
+        );
+    }
 
-        unsafe {
-            std::env::set_var("GTASKBAR_CLIENT_SECRET", "GOCSPX-secret");
-        }
-        let (id, secret) = credentials_from_env().expect("both set");
-        assert_eq!(id, "id.apps.googleusercontent.com");
-        assert_eq!(secret, "GOCSPX-secret");
+    #[test]
+    fn credentials_are_returned_when_both_are_present() {
+        let credentials = credentials_from(
+            Some("id.apps.googleusercontent.com".into()),
+            Some("secret".into()),
+        )
+        .expect("both set");
+        assert_eq!(credentials.client_id, "id.apps.googleusercontent.com");
+        assert_eq!(credentials.client_secret, "secret");
+    }
 
-        unsafe {
-            std::env::remove_var("GTASKBAR_CLIENT_ID");
-            std::env::remove_var("GTASKBAR_CLIENT_SECRET");
+    #[test]
+    fn blank_credentials_are_rejected() {
+        // A present-but-empty variable is a misconfiguration, not a credential.
+        for (id, secret) in [
+            (Some("   ".to_string()), Some("secret".to_string())),
+            (Some("id".to_string()), Some("   ".to_string())),
+            (Some(String::new()), Some(String::new())),
+        ] {
+            assert!(
+                credentials_from(id, secret).is_none(),
+                "whitespace-only credentials must not be accepted"
+            );
         }
     }
 }
