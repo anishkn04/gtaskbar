@@ -43,7 +43,7 @@ toml = "1"
 
 rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "sync"] }
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "query",

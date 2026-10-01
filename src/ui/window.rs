@@ -43,20 +43,49 @@ pub fn activate(app: &adw::Application) {
     // is the way to actually exit.
     window.connect_close_request(|window| {
         if allow_close_requested() {
-            glib::Propagation::Proceed
-        } else {
-            window.set_visible(false);
-            glib::Propagation::Stop
+            return glib::Propagation::Proceed;
         }
+
+        // Only hide when there is genuinely somewhere to unhide from. Without a
+        // tray this would leave the app running with no way to reach it.
+        if Config::load().close_to_tray && crate::sync::scheduler::has_tray() {
+            window.set_visible(false);
+            return glib::Propagation::Stop;
+        }
+
+        glib::Propagation::Proceed
     });
 
     crate::ui::sidebar::register_actions(&window);
+    register_window_actions(&window);
     crate::notify::register_actions(app);
     crate::notify::init(app);
     window.present();
 
     crate::register_actions(app);
     crate::sync::scheduler::init(app, &window.clone().upcast(), &config);
+}
+
+/// Actions scoped to the window rather than the application.
+///
+/// `close` in particular has to be window-scoped: it must go through the
+/// window's `close-request`, which decides between hiding to the tray and
+/// actually quitting. Binding it to `app.quit` would skip that decision and
+/// exit even when the user only meant to dismiss the window.
+fn register_window_actions(window: &adw::ApplicationWindow) {
+    use gtk::gio;
+
+    let close = gio::ActionEntry::builder("close")
+        .activate(|window: &adw::ApplicationWindow, _, _| window.close())
+        .build();
+
+    let search = gio::ActionEntry::builder("search")
+        .activate(|_window: &adw::ApplicationWindow, _, _| {
+            crate::ui::tasklist_view::focus_search();
+        })
+        .build();
+
+    window.add_action_entries([close, search]);
 }
 
 /// Rebuilds the split view, so the sidebar reflects a change such as
@@ -135,12 +164,6 @@ pub fn present(app: &adw::Application) {
 pub fn focus_quick_add(app: &adw::Application) {
     activate(app);
     crate::ui::tasklist_view::focus_quick_add();
-}
-
-/// Focus the search field of the visible pane.
-pub fn focus_search(app: &adw::Application) {
-    activate(app);
-    crate::ui::tasklist_view::focus_search();
 }
 
 /// Stop intercepting `close-request`, so the window really closes. Called from

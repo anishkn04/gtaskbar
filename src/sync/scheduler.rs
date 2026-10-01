@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 use gtk::glib;
+use gtk::prelude::*;
 
 use crate::api::TasksClient;
 use crate::config::Config;
@@ -19,6 +20,10 @@ thread_local! {
     static WINDOW: RefCell<Option<gtk::Window>> = const { RefCell::new(None) };
     static STORE: RefCell<Option<Store>> = const { RefCell::new(None) };
     static SYNCING: RefCell<bool> = const { RefCell::new(false) };
+    static TRAY: RefCell<Option<crate::ui::tray::TrayIcon>> = const { RefCell::new(None) };
+    /// Whether a tray icon is actually registered, so closing the window knows
+    /// whether hiding somewhere is safe.
+    static HAS_TRAY: RefCell<bool> = const { RefCell::new(true) };
 }
 
 thread_local! {
@@ -93,14 +98,17 @@ pub fn init(app: &adw::Application, window: &gtk::Window, config: &Config) {
         }
     };
     let handle = runtime.handle().clone();
-    RUNTIME.with(|slot| *slot.borrow_mut() = Some(handle));
+    RUNTIME.with(|slot| *slot.borrow_mut() = Some(handle.clone()));
     // Park the runtime on its own thread so `Handle::spawn` has somewhere to
-    // run the task.
+    // run the task. The tray lives on this runtime too, since it is an async
+    // D-Bus service.
     std::thread::Builder::new()
         .name("gtaskbar-sync".into())
         .spawn(move || runtime.block_on(std::future::pending::<()>()))
         .map_err(|err| log::error!("could not start the sync thread: {err}"))
         .ok();
+
+    start_tray(&handle, app);
 
     let minutes = config.poll_interval_minutes.max(1);
     glib::timeout_add_local_once(Duration::from_secs(2), {
@@ -116,7 +124,128 @@ pub fn init(app: &adw::Application, window: &gtk::Window, config: &Config) {
         }
     });
 
+    // The tray's callbacks arrive on the runtime thread and must not touch
+    // widgets, so its intents are drained here on the main loop.
+    let app_for_tray = app.clone();
+    glib::timeout_add_local(Duration::from_millis(250), move || {
+        // The borrow of TRAY is released before anything else here runs, since
+        // `refresh_tray_attention` borrows it again and a nested borrow would
+        // panic.
+        let dropped = TRAY.with(|slot| match slot.borrow().as_ref() {
+            Some(tray) => !tray.is_alive(),
+            None => false,
+        });
+
+        if dropped {
+            log::warn!("the tray icon was dropped by the shell; re-registering");
+            TRAY.with(|slot| {
+                slot.borrow_mut().take();
+            });
+            HAS_TRAY.with(|flag| *flag.borrow_mut() = false);
+            if let Some(runtime) = RUNTIME.with(|slot| slot.borrow().clone()) {
+                start_tray(&runtime, &app_for_tray);
+            }
+            return glib::ControlFlow::Continue;
+        }
+
+        let events = TRAY.with(|slot| {
+            let mut collected = Vec::new();
+            if let Some(tray) = slot.borrow_mut().as_mut() {
+                tray.dispatch(|event| collected.push(event));
+            }
+            collected
+        });
+
+        for event in events {
+            handle_tray_event(&app_for_tray, event);
+        }
+
+        // Recomputed on the same tick, so completing a task from the tray
+        // clears the badge without waiting for a sync.
+        refresh_tray_attention();
+        glib::ControlFlow::Continue
+    });
+
     log::info!("scheduler initialised with a {minutes} minute poll interval");
+}
+
+/// Registers the tray icon, if the shell has somewhere to put it.
+///
+/// A missing tray is a supported state, not a failure: without one, closing the
+/// window has to quit rather than hide, or the app becomes unreachable.
+fn start_tray(runtime: &tokio::runtime::Handle, app: &adw::Application) {
+    match crate::ui::tray::TrayIcon::spawn(runtime) {
+        Some(tray) => {
+            tray.set_connected(crate::auth::session::is_connected());
+            log::info!("tray icon registered");
+            HAS_TRAY.with(|flag| *flag.borrow_mut() = true);
+            TRAY.with(|slot| *slot.borrow_mut() = Some(tray));
+            refresh_tray_attention();
+        }
+        None => {
+            log::warn!(
+                "no status-notifier host is available; closing the window will quit instead of \
+                 hiding to the tray"
+            );
+            HAS_TRAY.with(|flag| *flag.borrow_mut() = false);
+            let _ = app;
+        }
+    }
+}
+
+/// Whether closing the window can hide to a tray.
+///
+/// The window uses this to decide between hiding and quitting: hiding with no
+/// tray would leave the app running with no way to reach or close it.
+pub fn has_tray() -> bool {
+    HAS_TRAY.with(|flag| *flag.borrow())
+}
+
+/// Recomputes the tray's attention count from the cache.
+///
+/// Due today plus overdue, because those are the tasks that are actually
+/// actionable now; anything later is not what the badge is for. A task already
+/// completed never counts, and an undated task never counts.
+pub fn refresh_tray_attention() {
+    let today = crate::model::view::today();
+    use crate::store::models::TaskStatus;
+
+    let count = with_store(|cache| {
+        cache
+            .all_tasks()
+            .map(|tasks| {
+                tasks
+                    .iter()
+                    .filter(|task| {
+                        task.status == TaskStatus::NeedsAction
+                            && task.due.is_some_and(|due| due <= today)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    })
+    .unwrap_or(0);
+
+    TRAY.with(|slot| {
+        if let Some(tray) = slot.borrow().as_ref() {
+            tray.set_attention(count);
+        }
+    });
+}
+
+/// Carries out a tray intent on the main thread.
+fn handle_tray_event(app: &adw::Application, event: crate::ui::tray::Event) {
+    use crate::ui::tray::Event;
+
+    match event {
+        Event::AddTask => crate::ui::tasklist_view::focus_quick_add(),
+        Event::SyncNow => request_sync(app),
+        Event::ShowWindow => crate::ui::window::present(app),
+        Event::Quit => {
+            crate::ui::window::allow_close();
+            app.quit();
+        }
+    }
 }
 
 /// Public entry point used by the `sync-now` action and the tray menu.
@@ -167,6 +296,11 @@ fn spawn_sync(app: adw::Application) {
     };
 
     SYNCING.with(|flag| *flag.borrow_mut() = true);
+    TRAY.with(|slot| {
+        if let Some(tray) = slot.borrow().as_ref() {
+            tray.set_syncing(true);
+        }
+    });
     update_status(&app, Some("Syncing…"));
 
     let handle = match RUNTIME.with(|slot| slot.borrow().clone()) {
@@ -201,6 +335,7 @@ fn spawn_sync(app: adw::Application) {
                             log::info!("{message}");
                         }
                         crate::ui::window::set_status(&app, None);
+                        refresh_tray_attention();
                         glib::ControlFlow::Break
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,

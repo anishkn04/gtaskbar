@@ -76,12 +76,6 @@ pub fn register_actions(app: &adw::Application) {
         })
         .build();
 
-    let search = gio::ActionEntry::builder("search")
-        .activate(|app: &adw::Application, _, _| {
-            ui::window::focus_search(app);
-        })
-        .build();
-
     let show_window = gio::ActionEntry::builder("show-window")
         .activate(|app: &adw::Application, _, _| ui::window::present(app))
         .build();
@@ -128,7 +122,6 @@ pub fn register_actions(app: &adw::Application) {
         about,
         sync_now,
         add_task,
-        search,
         show_window,
         connect,
         disconnect,
