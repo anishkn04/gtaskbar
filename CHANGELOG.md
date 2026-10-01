@@ -71,6 +71,12 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 
 ### Fixed
 
+- **Quick-add created into the wrong list.** The visible pane was found by
+  visibility flag, but `AdwViewStack` unmaps hidden pages without clearing
+  their flag, so every pane reported visible and the lookup always returned
+  the first one (Today, which has no list), falling back to the first account
+  list whatever was viewed. The lookup now matches on mapped pages, verified
+  live by selecting the Routine row and asking which pane answers.
 - **List badges showed the account total on every list.** Each row counted all
   open tasks instead of its own, so the empty Routine list wore Anis Nep's "3"
   while showing "Nothing here". Counts are now computed per list, and an empty

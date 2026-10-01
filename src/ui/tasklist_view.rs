@@ -38,11 +38,17 @@ pub fn register_panes(panes: Vec<TaskListView>) {
 }
 
 /// The pane whose page is currently visible in the content stack, if any.
+///
+/// This checks `mapped`, not `visible`: `AdwViewStack` unmaps hidden pages
+/// without clearing their visibility flag, so every pane reports
+/// `is_visible() == true` and a lookup on it always returns the first pane.
+/// That misdirected quick-add into the fallback list no matter what the user
+/// was viewing.
 pub fn visible_pane() -> Option<TaskListView> {
     PANES.with(|slot| {
         slot.borrow()
             .iter()
-            .find(|pane| pane.root.is_visible())
+            .find(|pane| pane.root.is_mapped())
             .cloned()
     })
 }
@@ -447,6 +453,30 @@ mod tests {
     use super::*;
     use crate::store::models::TaskStatus;
     use chrono::NaiveDate;
+
+    /// `visible_pane` must consult mapping, not visibility flags.
+    /// `AdwViewStack` unmaps hidden pages without clearing their flag, so a
+    /// lookup on `is_visible()` always returned the first pane and quick-add
+    /// landed in the fallback list no matter what was viewed. Mapping cannot
+    /// be exercised without a display, so this pins the lookup instead.
+    #[test]
+    fn the_visible_pane_lookup_uses_mapping() {
+        let source = include_str!("tasklist_view.rs");
+        let start = source
+            .find("pub fn visible_pane")
+            .expect("visible_pane exists");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("function ends at column zero");
+        let body = &body[..end];
+        assert!(
+            body.contains("is_mapped()"),
+            "visible_pane must match on mapped pages; is_visible() is true for every page"
+        );
+        assert!(
+            !body.contains("is_visible()"),
+            "is_visible() matches hidden stack pages and always returns the first pane"
+        );
+    }
 
     fn task(id: &str, parent: Option<&str>) -> Task {
         Task {
