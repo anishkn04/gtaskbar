@@ -19,9 +19,14 @@ const TICK: Duration = Duration::from_secs(60);
 
 /// The action behind each notification's Complete button.
 ///
-/// `GNotification` buttons name an action plus an optional target value, so a
-/// single action serves every task and carries its own identity.
-const ACTION_COMPLETE: &str = "complete-task";
+/// Must carry the `app.` prefix: GIO routes notification actions by
+/// `app.`- and `win.`-prefixed names, and logs a warning for anything else.
+/// An unprefixed name looks like it works and silently does not, so the
+/// registration has to match this string exactly.
+///
+/// A single action serves every task, with the task's identity passed as the
+/// target value.
+const ACTION_COMPLETE: &str = "app.complete-task";
 
 /// Notification id for the batch of tasks that became due today.
 const ID_DUE_TODAY: &str = "gtaskbar-due-today";
@@ -31,7 +36,7 @@ const ID_OVERDUE: &str = "gtaskbar-overdue";
 
 /// Registers the action the notification buttons dispatch to.
 pub fn register_actions(app: &adw::Application) {
-    let complete = gio::ActionEntry::builder(ACTION_COMPLETE)
+    let complete = gio::ActionEntry::builder("complete-task")
         .activate(|app: &adw::Application, _, parameter| {
             let Some(task_id) = parameter.and_then(|value| value.str()) else {
                 return;
@@ -42,13 +47,14 @@ pub fn register_actions(app: &adw::Application) {
             crate::sync::scheduler::request_sync(app);
 
             // Re-sending under the same id replaces the notification rather than
-            // adding another, which is how a completed task is removed from the
-            // list. There is no way to dismiss by id from here, so replacement
-            // is the mechanism.
-            let kind = parameter
-                .and_then(|value| value.str())
-                .map(|id| id.to_string());
-            refresh_batch(app, kind.as_deref());
+            // stacking another, which is how a completed task leaves the list.
+            // There is no way to dismiss by id from here, so replacement is the
+            // mechanism. Both batches are refreshed because a task that is
+            // overdue is also a candidate for the due-today batch, and the
+            // action does not say which one it came from.
+            for batch in [Batch::DueToday, Batch::Overdue] {
+                refresh_batch(app, batch);
+            }
         })
         .build();
 
@@ -68,14 +74,6 @@ impl Batch {
         match self {
             Batch::DueToday => ID_DUE_TODAY,
             Batch::Overdue => ID_OVERDUE,
-        }
-    }
-
-    fn parse(id: &str) -> Option<Self> {
-        match id {
-            ID_DUE_TODAY => Some(Batch::DueToday),
-            ID_OVERDUE => Some(Batch::Overdue),
-            _ => None,
         }
     }
 
@@ -102,11 +100,7 @@ thread_local! {
 }
 
 /// Re-sends a batch without the task that was just completed.
-fn refresh_batch(app: &adw::Application, kind: Option<&str>) {
-    let Some(batch) = kind.and_then(Batch::parse) else {
-        return;
-    };
-
+fn refresh_batch(app: &adw::Application, batch: Batch) {
     let remaining: Vec<Task> = LAST_SENT.with(|sent| {
         let mut map = sent.borrow_mut();
         let entry = map.entry(batch.id()).or_default();
@@ -226,15 +220,12 @@ fn send(app: &adw::Application, batch: Batch, tasks: &[Task]) {
         }
     }
 
-    // A button per task, each carrying the batch it belongs to and the task's
-    // id, so acting on one does not require knowing which notification it came
-    // from.
+    // A button per task, carrying that task's id as the target value.
     for task in tasks.iter().take(5) {
-        let target = format!("{}|{}", batch.id(), task.id);
         notification.add_button_with_target_value(
             &format!("Complete \u{201c}{}\u{201d}", truncate(&task.title, 40)),
             ACTION_COMPLETE,
-            Some(&glib::Variant::from(target.as_str())),
+            Some(&glib::Variant::from(task.id.as_str())),
         );
     }
 
@@ -288,11 +279,8 @@ mod tests {
     }
 
     #[test]
-    fn batch_ids_are_distinct_and_round_trip() {
+    fn batch_ids_are_distinct() {
         assert_ne!(Batch::DueToday.id(), Batch::Overdue.id());
-        assert_eq!(Batch::parse(Batch::DueToday.id()), Some(Batch::DueToday));
-        assert_eq!(Batch::parse(Batch::Overdue.id()), Some(Batch::Overdue));
-        assert_eq!(Batch::parse("something-else"), None);
     }
 
     #[test]
