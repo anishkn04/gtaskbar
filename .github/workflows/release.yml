@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (e.g. v0.1.0)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build release bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            glib-compile-resources
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          tag="${GITHUB_REF#refs/tags/}"
+          tag="${tag:-v$version}"
+          staging="gtaskbar-$version"
+          mkdir -p "$staging"
+
+          cp target/release/gtaskbar "$staging/"
+          cp data/gtaskbar.desktop "$staging/"
+          cp data/icons/scalable/apps/gtaskbar.svg "$staging/"
+          cp data/icons/symbolic/apps/gtaskbar-symbolic.svg "$staging/"
+          cp README.md LICENSE CHANGELOG.md "$staging/"
+
+          tar -czf "$staging.tar.gz" "$staging"
+          echo "archive=$staging.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gtaskbar-${{ steps.package.outputs.version }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.archive }}
+          generate_release_notes: true
+          body: |
+            ## Installing
+
+            ```sh
+            tar -xzf gtaskbar-*.tar.gz
+            cd gtaskbar-*/
+            ./install.sh --no-build
+            ```
+
+            Or install the binary directly:
+
+            ```sh
+            install -Dm755 gtaskbar ~/.local/bin/gtaskbar
+            install -Dm644 gtaskbar.desktop ~/.local/share/applications/gtaskbar.desktop
+            ```
+
+            Requires GTK 4.14+ and libadwaita 1.4+.

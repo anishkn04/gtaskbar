@@ -125,7 +125,8 @@ fn build_sidebar(config: &Config) -> adw::NavigationPage {
             "Connect your Google account to load your task lists.\nSort: {} · Group: {}",
             config.sort_mode.label(),
             config.group_mode.label()
-        ))        .build();
+        ))
+        .build();
     stack.add_titled(&status, Some("status"), "Overview");
 
     // A NavigationPage's header is part of its child, so stack the header above

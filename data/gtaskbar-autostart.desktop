@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=GTaskbar
+GenericName=Google Tasks Client
+Comment=A native, tray-first Google Tasks client for Linux
+Exec=gtaskbar --hidden %U
+Icon=gtaskbar
+Terminal=false
+Categories=GNOME;GTK;Utility;
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+X-GNOME-UsesNotifications=true

@@ -18,6 +18,14 @@ thread_local! {
 pub fn init(app: &adw::Application, window: &gtk::Window, config: &Config) {
     WINDOW.with(|w| *w.borrow_mut() = Some(window.clone()));
 
+    // Make sure the data directory exists before anything tries to write to it.
+    if let Err(err) = std::fs::create_dir_all(crate::config::data_dir()) {
+        log::warn!(
+            "could not create data directory {}: {err}",
+            crate::config::data_dir().display()
+        );
+    }
+
     let minutes = config.poll_interval_minutes.max(1);
     glib::timeout_add_local_once(Duration::from_secs(2), {
         let app = app.clone();

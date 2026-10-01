@@ -175,10 +175,12 @@ mod tests {
 
     #[test]
     fn round_trips_through_toml() {
-        let mut config = Config::default();
-        config.sort_mode = SortMode::Priority;
-        config.group_mode = GroupMode::ByDue;
-        config.notify_hour = 7;
+        let config = Config {
+            sort_mode: SortMode::Priority,
+            group_mode: GroupMode::ByDue,
+            notify_hour: 7,
+            ..Default::default()
+        };
 
         let encoded = toml::to_string_pretty(&config).expect("serialise");
         let decoded: Config = toml::from_str(&encoded).expect("deserialise");
@@ -192,11 +194,16 @@ mod tests {
     fn missing_fields_fall_back_to_defaults() {
         let decoded: Config = toml::from_str("notify_hour = 6").expect("deserialise");
         assert_eq!(decoded.notify_hour, 6);
-        assert_eq!(config_defaults_guard(decoded), Config::default().notify_overdue);
-    }
-
-    fn config_defaults_guard(config: Config) -> bool {
-        config.notify_overdue
+        // Everything not present in the TOML must come from Default.
+        let defaults = Config::default();
+        assert_eq!(decoded.sort_mode, defaults.sort_mode);
+        assert_eq!(decoded.group_mode, defaults.group_mode);
+        assert_eq!(
+            decoded.poll_interval_minutes,
+            defaults.poll_interval_minutes
+        );
+        assert_eq!(decoded.notify_overdue, defaults.notify_overdue);
+        assert_eq!(decoded.close_to_tray, defaults.close_to_tray);
     }
 
     #[test]

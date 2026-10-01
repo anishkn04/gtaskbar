@@ -11,7 +11,8 @@ fn main() -> glib::ExitCode {
     gio::resources_register_include!("gtaskbar.gresource")
         .expect("failed to register GResource bundle");
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("gtaskbar=info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("gtaskbar=info"))
+        .init();
 
     let app = adw::Application::builder()
         .application_id("dev.anishkn04.gtaskbar")

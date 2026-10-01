@@ -55,9 +55,7 @@ pub fn present(app: &adw::Application) {
     notifications.add(&notify_overdue_row());
     page.add(&notifications);
 
-    let behaviour = adw::PreferencesGroup::builder()
-        .title("Behaviour")
-        .build();
+    let behaviour = adw::PreferencesGroup::builder().title("Behaviour").build();
     behaviour.add(&close_to_tray_row());
     page.add(&behaviour);
 

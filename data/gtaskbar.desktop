@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=GTaskbar
+GenericName=Google Tasks Client
+Comment=A native, tray-first Google Tasks client for Linux
+Exec=gtaskbar %U
+Icon=gtaskbar
+Terminal=false
+Categories=GNOME;GTK;Utility;
+Keywords=google;tasks;todo;to-do;checklist;gtd;
+StartupNotify=true
+StartupWMClass=dev.anishkn04.gtaskbar
+SingleMainWindow=true
+X-GNOME-UsesNotifications=true
