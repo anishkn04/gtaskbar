@@ -28,7 +28,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev \
             libadwaita-1-dev \
-            glib-compile-resources
+            libglib2.0-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
