@@ -39,6 +39,9 @@ by CI against Ubuntu 24.04, which ships the oldest supported versions. They are
 set to what the app actually uses rather than to the newest release the
 bindings support, so the app builds on current LTS distributions.
 
+`adwaita-icon-theme` supplies every interface icon, so the app inherits the
+icon theme the desktop is already using.
+
 ## Installation
 
 ```sh

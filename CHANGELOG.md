@@ -44,12 +44,10 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 - **Notifications.** One per batch for tasks that become due and for tasks that
   go overdue, each with a **Complete** button per task. Deduplicated through the
   `notified` table so a task that stays due does not re-notify.
-- **Bundled icon set.** Fifteen monochrome icons in one visual language, built
-  into the binary so the app never depends on the system icon theme. See
-  [docs/icons.md](docs/icons.md).
-- **`tools/gen-icons.py` and `tools/icon-sheet.sh`.** The icon set is generated
-  rather than hand-drawn, and rendered as a contact sheet on both light and dark
-  backgrounds for review.
+- **Official GNOME interface icons.** Every icon in the interface is an
+  `adwaita-icon-theme` icon referenced by name and resolved from the system icon
+  theme, so the app follows the user's chosen theme, high-contrast variants and
+  custom icon sets. See [docs/icons.md](docs/icons.md).
 - CI: fmt, clippy with `-D warnings`, tests, a release build, an Arch container
   job, and a job pinned to the documented minimum GTK and libadwaita versions.
 - `install.sh` with `--no-build` and `--uninstall`, installing into `~/.local`
@@ -60,10 +58,11 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 - A task could be shown in the Completed view while still being open.
 - Sidebar membership was inferred from parent links rather than letting the
   store scope the query, which put every task in every list.
-- Icons drawn as strokes rendered as solid blobs, and thin-line icons were
-  invisible on a dark background, because GTK neither preserves `fill="none"`
-  nor reads `currentColor`. Both are documented in
-  [docs/icons.md](docs/icons.md) and prevented by the generator.
+- A hand-authored symbolic icon set rendered as solid blobs, and its thin-line
+  icons were invisible on a dark background, because GTK neither preserves
+  `fill="none"` nor reads `currentColor`. Replaced with upstream GNOME icons,
+  which is both the idiomatic choice for a libadwaita app and one that cannot
+  hit those constraints at all.
 
 ### Notes
 

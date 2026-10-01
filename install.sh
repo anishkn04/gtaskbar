@@ -87,9 +87,9 @@ mkdir -p "$BIN_DIR" "$DATA_DIR" "$APP_DIR" "$ICON_SCALE" "$ICON_SYMBOLIC" "$AUTO
 install -Dm755 "$SOURCE_BIN" "$BIN_DIR/$BIN_NAME"
 install -Dm644 "$SCRIPT_DIR/data/icons/scalable/apps/$BIN_NAME.svg" "$ICON_SCALE/$BIN_NAME.svg"
 
-# The full symbolic set. These are bundled in the binary too, so installing them
-# is only so that other applications and the desktop shell can render them
-# consistently; gtaskbar itself never depends on the copies on disk.
+# The symbolic variant of the app icon, for the tray and for notifications.
+# Interface icons are not installed: they are official GNOME icons resolved from
+# the system icon theme at runtime.
 for icon in "$SCRIPT_DIR/data/icons/symbolic/apps/$BIN_NAME"*.svg; do
     [ -e "$icon" ] || continue
     install -Dm644 "$icon" "$ICON_SYMBOLIC/$(basename "$icon")"

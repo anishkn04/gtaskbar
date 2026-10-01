@@ -1,23 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  gtaskbar application icon.
+
+  Glyph: Material Symbols "checklist" (outlined, 24px), taken verbatim from
+  Google's official material-design-icons repository:
+
+    symbols/web/checklist/materialsymbolsoutlined/checklist_24px.svg
+    https://github.com/google/material-design-icons
+
+  Licensed under the Apache License 2.0; a copy is at
+  data/icons/upstream/LICENSE-Apache-2.0.txt and the unmodified upstream file is
+  at data/icons/upstream/material-symbols-checklist-24px.svg.
+
+  The upstream file declares viewBox="0 -960 960 960" with a 24px size. The only
+  change here is the viewBox, re-centred onto a 128px artboard so the icon fills
+  a launcher slot properly. The path data is unmodified.
+-->
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <defs>
-    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#3a3550"/>
-      <stop offset="1" stop-color="#241f33"/>
-    </linearGradient>
-  </defs>
-
-  <rect x="6" y="6" width="116" height="116" rx="28" fill="url(#plate)"/>
-
-  <!-- Stroked marks, matching the symbolic icon's language: same shapes, same
-       proportions, drawn in the light foreground so they read on the plate. -->
-  <g fill="none" stroke="#f2ecf7" stroke-width="9"
-     stroke-linecap="round" stroke-linejoin="round">
-    <path d="M42 42H32a8 8 0 0 0-8 8v44a8 8 0 0 0 8 8h56a8 8 0 0 0 8-8V50a8 8 0 0 0-8-8H86"/>
-    <rect x="47" y="26" width="34" height="24" rx="7"/>
-    <path d="M48 65l9 9 20-20"/>
-    <path d="M88 65h14"/>
-    <path d="M48 87l9 9 20-20"/>
-    <path d="M88 87h14"/>
+  <!-- Inset the glyph so it has breathing room inside the slot. -->
+  <g transform="translate(64 64) scale(0.125) translate(-480 480)">
+    <path fill="#f2ecf7" d="M222-200 80-342l56-56 85 85 170-170 56 57-225 226Zm0-320L80-662l56-56 85 85 170-170 56 57-225 226Zm298 240v-80h360v80H520Zm0-320v-80h360v80H520Z"/>
   </g>
 </svg>
