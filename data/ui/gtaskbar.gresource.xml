@@ -4,10 +4,35 @@
     <file compressed="true" alias="ui/style.css">ui/style.css</file>
     <file compressed="true" preprocess="xml-stripblanks">ui/menus.ui</file>
   </gresource>
+
+  <!--
+    Icons are registered under the app's own prefix so GTK resolves them by
+    plain name, and so the app never falls back to whatever the system icon
+    theme happens to contain. Keeping them in the binary means the app looks
+    identical on a bare Arch install and on a fully themed desktop.
+
+    All symbolic icons follow one language: 16px grid, 1.5px single stroke,
+    round caps, currentColor only, no multi-colour emblems.
+  -->
   <gresource prefix="/dev/anishkn04/gtaskbar/icons/scalable/apps">
     <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar.svg">../icons/scalable/apps/gtaskbar.svg</file>
   </gresource>
+
   <gresource prefix="/dev/anishkn04/gtaskbar/icons/symbolic/apps">
     <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-symbolic.svg">../icons/symbolic/apps/gtaskbar-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-today-symbolic.svg">../icons/symbolic/apps/gtaskbar-today-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-upcoming-symbolic.svg">../icons/symbolic/apps/gtaskbar-upcoming-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-overdue-symbolic.svg">../icons/symbolic/apps/gtaskbar-overdue-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-all-symbolic.svg">../icons/symbolic/apps/gtaskbar-all-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-completed-symbolic.svg">../icons/symbolic/apps/gtaskbar-completed-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-list-symbolic.svg">../icons/symbolic/apps/gtaskbar-list-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-check-symbolic.svg">../icons/symbolic/apps/gtaskbar-check-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-add-symbolic.svg">../icons/symbolic/apps/gtaskbar-add-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-sync-symbolic.svg">../icons/symbolic/apps/gtaskbar-sync-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-settings-symbolic.svg">../icons/symbolic/apps/gtaskbar-settings-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-menu-symbolic.svg">../icons/symbolic/apps/gtaskbar-menu-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-close-symbolic.svg">../icons/symbolic/apps/gtaskbar-close-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-search-symbolic.svg">../icons/symbolic/apps/gtaskbar-search-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="gtaskbar-account-symbolic.svg">../icons/symbolic/apps/gtaskbar-account-symbolic.svg</file>
   </gresource>
 </gresources>

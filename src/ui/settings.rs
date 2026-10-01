@@ -2,6 +2,7 @@ use std::cell::RefCell;
 
 use adw::prelude::*;
 
+use super::icons;
 use crate::config::{Config, GroupMode, SortMode};
 
 /// Preferences dialog. Deliberately not a GObject subclass: every control reads
@@ -36,7 +37,7 @@ pub fn present(app: &adw::Application) {
 
     let page = adw::PreferencesPage::builder()
         .title("General")
-        .icon_name("preferences-system-symbolic")
+        .icon_name(icons::SETTINGS)
         .build();
 
     let display = adw::PreferencesGroup::builder()

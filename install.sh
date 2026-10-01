@@ -46,7 +46,8 @@ uninstall() {
     rm -f "$APP_DIR/$BIN_NAME.desktop"
     rm -f "$AUTOSTART_DIR/$BIN_NAME.desktop"
     rm -f "$ICON_SCALE/$BIN_NAME.svg"
-    rm -f "$ICON_SYMBOLIC/$BIN_NAME-symbolic.svg"
+    # Remove every bundled symbolic icon, not just the app's own.
+    rm -f "$ICON_SYMBOLIC/$BIN_NAME"*.svg
     rm -rf "$DATA_DIR"
     # Only prune the icon cache if update-desktop-cache and gtk-update-icon-cache
     # are actually installed; missing tools are not a reason to fail.
@@ -85,7 +86,15 @@ mkdir -p "$BIN_DIR" "$DATA_DIR" "$APP_DIR" "$ICON_SCALE" "$ICON_SYMBOLIC" "$AUTO
 
 install -Dm755 "$SOURCE_BIN" "$BIN_DIR/$BIN_NAME"
 install -Dm644 "$SCRIPT_DIR/data/icons/scalable/apps/$BIN_NAME.svg" "$ICON_SCALE/$BIN_NAME.svg"
-install -Dm644 "$SCRIPT_DIR/data/icons/symbolic/apps/$BIN_NAME-symbolic.svg" "$ICON_SYMBOLIC/$BIN_NAME-symbolic.svg"
+
+# The full symbolic set. These are bundled in the binary too, so installing them
+# is only so that other applications and the desktop shell can render them
+# consistently; gtaskbar itself never depends on the copies on disk.
+for icon in "$SCRIPT_DIR/data/icons/symbolic/apps/$BIN_NAME"*.svg; do
+    [ -e "$icon" ] || continue
+    install -Dm644 "$icon" "$ICON_SYMBOLIC/$(basename "$icon")"
+done
+
 install -Dm644 "$SCRIPT_DIR/data/$BIN_NAME.desktop" "$APP_DIR/$BIN_NAME.desktop"
 install -Dm644 "$SCRIPT_DIR/data/$BIN_NAME-autostart.desktop" "$AUTOSTART_DIR/$BIN_NAME.desktop"
 

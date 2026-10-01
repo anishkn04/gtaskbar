@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use adw::prelude::*;
 use gtk::gio;
 
+use super::icons;
 use crate::config::Config;
 
 /// The single main window. Created once and reused for the lifetime of the
@@ -25,12 +26,16 @@ pub fn activate(app: &adw::Application) {
     crate::sync::scheduler::open_store();
 
     let root = build_ui(&config);
+    let toast_overlay = adw::ToastOverlay::new();
+    toast_overlay.set_child(Some(&root));
+    TOASTS.with(|slot| *slot.borrow_mut() = Some(toast_overlay.clone()));
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("GTaskbar")
         .default_width(980)
         .default_height(680)
-        .content(&root)
+        .content(&toast_overlay)
         .build();
 
     // Closing the window hides it to the tray rather than quitting, so the
@@ -51,8 +56,74 @@ pub fn activate(app: &adw::Application) {
     crate::sync::scheduler::init(app, &window.clone().upcast(), &config);
 }
 
+/// Rebuilds the split view, so the sidebar reflects a change such as
+/// connecting or disconnecting an account.
+pub fn rebuild(app: &adw::Application) {
+    let windows = app.windows();
+    let Some(window) = windows
+        .first()
+        .and_then(|w| w.downcast_ref::<adw::ApplicationWindow>())
+    else {
+        return;
+    };
+
+    let config = Config::load();
+    let root = build_ui(&config);
+
+    // The window's content is always the ToastOverlay that `activate` created;
+    // swapping its child preserves any toast that is already showing.
+    let child = window.child();
+    let is_overlay = matches!(
+        child
+            .as_ref()
+            .and_then(|c| c.downcast_ref::<adw::ToastOverlay>()),
+        Some(_)
+    );
+
+    if is_overlay {
+        if let Some(overlay) = child
+            .as_ref()
+            .and_then(|c| c.downcast_ref::<adw::ToastOverlay>())
+        {
+            overlay.set_child(Some(&root));
+            return;
+        }
+    }
+    window.set_content(Some(&root));
+}
+
 thread_local! {
     static ALLOW_CLOSE: RefCell<bool> = const { RefCell::new(false) };
+    static TOASTS: RefCell<Option<adw::ToastOverlay>> = const { RefCell::new(None) };
+}
+
+/// Shows a transient message at the bottom of the main window.
+///
+/// Safe to call from any thread: the work is marshalled onto the GLib main
+/// context, because the sync worker reports back from a Tokio thread.
+pub fn set_status(app: &adw::Application, message: Option<&str>) {
+    let message = message.map(str::to_string);
+    let app = app.clone();
+
+    let show = move || {
+        let Some(message) = message else { return };
+        let Some(overlay) = TOASTS.with(|slot| slot.borrow().clone()) else {
+            return;
+        };
+        if !app.windows().iter().any(|w| w.is_visible()) {
+            return;
+        }
+        let toast = adw::Toast::new(&message);
+        toast.set_timeout(4);
+        overlay.add_toast(toast);
+    };
+
+    let main = glib::MainContext::default();
+    if main.is_owner() {
+        show();
+    } else {
+        main.spawn_local(async move { show() });
+    }
 }
 
 fn allow_close_requested() -> bool {
@@ -91,7 +162,7 @@ fn build_ui(config: &Config) -> adw::NavigationSplitView {
     let placeholder = adw::StatusPage::builder()
         .title("GTaskbar")
         .description("Google Tasks client")
-        .icon_name("org.gnome.Todo")
+        .icon_name(icons::APP)
         .build();
     content_stack.add_titled(&placeholder, Some("placeholder"), "Overview");
 
@@ -110,12 +181,15 @@ fn build_sidebar(config: &Config) -> adw::NavigationPage {
     let header = adw::HeaderBar::new();
 
     // A primary menu button in the header, matching GNOME convention.
+    // `primary` is set through the GObject property API rather than the typed
+    // setter, because the typed one is behind the crate's `v4_4` feature and
+    // enabling it would require a newer GTK than some distributions ship.
     let menu_button = gtk::MenuButton::builder()
-        .icon_name("open-menu-symbolic")
+        .icon_name(icons::MENU)
         .tooltip_text("Main menu")
         .menu_model(&main_menu())
-        .primary(true)
         .build();
+    menu_button.set_property("primary", true);
     header.pack_end(&menu_button);
 
     let stack = adw::ViewStack::new();
@@ -134,14 +208,39 @@ fn build_sidebar(config: &Config) -> adw::NavigationPage {
 
     if lists.is_empty() {
         let status = adw::StatusPage::builder()
-            .icon_name("view-list-symbolic")
-            .title("No lists yet")
-            .description(format!(
-                "Connect your Google account to load your task lists.\nSort: {} · Group: {}",
-                config.sort_mode.label(),
-                config.group_mode.label()
-            ))
+            .icon_name(if crate::auth::session::is_connected() {
+                icons::LIST
+            } else {
+                icons::ACCOUNT
+            })
+            .title(if crate::auth::session::is_connected() {
+                "No task lists"
+            } else {
+                "Not connected"
+            })
+            .description(if crate::auth::session::is_connected() {
+                format!(
+                    "Your account is connected, but no task lists have arrived yet.\nSort: {} · Group: {}",
+                    config.sort_mode.label(),
+                    config.group_mode.label()
+                )
+            } else {
+                "Connect your Google account to load your task lists.".to_string()
+            })
             .build();
+
+        // Only offer the connect action when there is something to connect.
+        if !crate::auth::session::is_connected() {
+            let connect = gtk::Button::with_label("Connect Google account");
+            connect.add_css_class("pill");
+            connect.add_css_class("suggested-action");
+            connect.set_halign(gtk::Align::Center);
+            connect.connect_clicked(|_| {
+                crate::ui::connect::present();
+            });
+            status.set_child(Some(&connect));
+        }
+
         stack.add_titled(&status, Some("status"), "Overview");
     } else {
         let list = gtk::ListBox::builder()
@@ -163,7 +262,7 @@ fn build_sidebar(config: &Config) -> adw::NavigationPage {
                 .title(&task_list.title)
                 .activatable(true)
                 .build();
-            row.add_prefix(&gtk::Image::from_icon_name("view-list-symbolic"));
+            row.add_prefix(&icons::image(icons::LIST));
             if incomplete > 0 {
                 let count = gtk::Button::builder()
                     .label(incomplete.to_string())
@@ -202,6 +301,11 @@ fn main_menu() -> gio::Menu {
     let primary = gio::Menu::new();
     primary.append(Some("Add Task"), Some("app.add-task"));
     primary.append(Some("Sync Now"), Some("app.sync-now"));
+    if crate::auth::session::is_connected() {
+        primary.append(Some("Disconnect Account"), Some("app.disconnect-account"));
+    } else {
+        primary.append(Some("Connect Account"), Some("app.connect-account"));
+    }
     menu.append_section(None, &primary);
 
     let secondary = gio::Menu::new();
