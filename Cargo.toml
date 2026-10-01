@@ -23,7 +23,12 @@ fullname = "GTaskbar"
 gtk = { package = "gtk4", version = "0.11" }
 glue = "0.1"
 gdk = { package = "gdk4", version = "0.11" }
-adw = { package = "libadwaita", version = "0.9", features = ["v1_9"] }
+# Feature gates are the app's real minimum, not the newest the crates support.
+# libadwaita 1.5 is what brings AdwPreferencesDialog and AdwAboutDialog; every
+# other widget in use (NavigationSplitView, NavigationPage, SpinRow, SwitchRow,
+# Toast, ToolbarView) landed by 1.4. Declaring v1_9 instead would refuse to
+# build on Ubuntu 24.04, which ships 1.5.
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 glib = "0.22"
 gio = "0.22"
 
@@ -42,11 +47,16 @@ tokio = { version = "1", features = ["rt"] }
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "query",
+    "form",
     "rustls",
     "http2",
     "gzip",
 ] }
-oauth2 = { version = "5", default-features = false, features = [
+# 4.4 is the last release with the documented BasicClient/EmptyExtraTokenParams
+# API. 5.0 redesigned the client's type parameters around EndpointState markers,
+# which is more machinery than a four-call token exchange needs.
+oauth2 = { version = "4.4", default-features = false, features = [
+    "reqwest",
     "rustls-tls",
     "pkce-plain",
 ] }

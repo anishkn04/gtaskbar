@@ -31,8 +31,13 @@ Planned:
 ## Requirements
 
 - GTK 4.14 or newer
-- libadwaita 1.4 or newer
+- libadwaita 1.5 or newer
 - A Google account with Google Tasks enabled
+
+These floors are enforced by the crate feature gates in `Cargo.toml` and verified
+by CI against Ubuntu 24.04, which ships the oldest supported versions. They are
+set to what the app actually uses rather than to the newest release the
+bindings support, so the app builds on current LTS distributions.
 
 ## Installation
 

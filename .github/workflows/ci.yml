@@ -74,3 +74,36 @@ jobs:
         run: |
           cargo test --locked
           cargo build --release --locked
+
+  minimums:
+    name: Build against the documented minimums
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the oldest supported GTK and libadwaita
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libglib2.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: minimums
+
+      # Guards the version floors documented in the README. The crate features
+      # in Cargo.toml are what enforce these: raising one above what the app
+      # needs makes the build fail here, on the oldest supported distro, rather
+      # than silently for every user on that distro.
+      - name: Report the GTK and libadwaita versions found
+        run: |
+          echo "gtk4:         $(pkg-config --modversion gtk4)"
+          echo "libadwaita-1: $(pkg-config --modversion libadwaita-1)"
+
+      - name: Build
+        run: cargo build --locked
+
