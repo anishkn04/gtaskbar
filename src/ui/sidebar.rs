@@ -107,22 +107,40 @@ fn heading_row(label: &str) -> gtk::ListBoxRow {
 }
 
 fn row_for(entry: &Entry) -> gtk::ListBoxRow {
-    let action = adw::ActionRow::builder()
-        .title(&entry.title)
-        .activatable(true)
-        .build();
+    // Built from a plain box rather than an AdwActionRow. AdwActionRow's suffix
+    // area fills its child vertically regardless of the child's own valign, so
+    // the count badge stretched to the full row height however it was styled or
+    // sized. A box honours valign, and the row needs no row chrome of its own:
+    // it sits inside a navigation-sidebar list, which already provides the
+    // hover and selection styling.
+    let icon = icons::image(entry.icon);
+    icon.set_pixel_size(16);
 
-    action.add_prefix(&icons::image(entry.icon));
+    let title = gtk::Label::builder()
+        .label(&entry.title)
+        .xalign(0.0)
+        .build();
+    title.set_hexpand(true);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    content.set_margin_top(6);
+    content.set_margin_bottom(6);
+    content.set_margin_start(6);
+    content.set_margin_end(6);
+    content.append(&icon);
+    content.append(&title);
 
     if entry.count > 0 {
         let badge = gtk::Label::builder().label(entry.count.to_string()).build();
         badge.add_css_class("gtaskbar-badge");
-        action.add_suffix(&badge);
+        badge.set_valign(gtk::Align::Center);
+        content.append(&badge);
     }
 
     gtk::ListBoxRow::builder()
         .activatable(true)
-        .child(&action)
+        .child(&content)
         .build()
 }
 
@@ -287,6 +305,9 @@ fn due_chip(task: &Task) -> Option<gtk::Label> {
     let chip = gtk::Label::builder().label(label).build();
     chip.add_css_class("gtaskbar-due-chip");
     chip.add_css_class(class);
+    // Same reason as the sidebar badge: a label in a box fills it by default.
+    chip.set_valign(gtk::Align::Center);
+    chip.set_size_request(-1, 17);
     Some(chip)
 }
 
