@@ -20,6 +20,10 @@ pub fn activate(app: &adw::Application) {
 
     let config = Config::load();
 
+    // The cache must be open before the window is built: the sidebar reads the
+    // cached task lists while constructing its widgets.
+    crate::sync::scheduler::open_store();
+
     let root = build_ui(&config);
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -116,18 +120,69 @@ fn build_sidebar(config: &Config) -> adw::NavigationPage {
 
     let stack = adw::ViewStack::new();
 
-    // Sidebar contents are wired up in the UI step; for now show the current
-    // configuration so the shell is verifiable.
-    let status = adw::StatusPage::builder()
-        .icon_name("view-list-symbolic")
-        .title("No lists yet")
-        .description(format!(
-            "Connect your Google account to load your task lists.\nSort: {} · Group: {}",
-            config.sort_mode.label(),
-            config.group_mode.label()
-        ))
-        .build();
-    stack.add_titled(&status, Some("status"), "Overview");
+    // Lists come from the local cache, so the sidebar renders instantly and
+    // works with no network. A cache miss (first run, or not connected yet)
+    // falls back to an explanatory empty state.
+    let lists = crate::sync::scheduler::with_store(|store| match store.task_lists() {
+        Ok(lists) => lists,
+        Err(err) => {
+            log::warn!("could not read task lists from the cache: {err}");
+            Vec::new()
+        }
+    })
+    .unwrap_or_default();
+
+    if lists.is_empty() {
+        let status = adw::StatusPage::builder()
+            .icon_name("view-list-symbolic")
+            .title("No lists yet")
+            .description(format!(
+                "Connect your Google account to load your task lists.\nSort: {} · Group: {}",
+                config.sort_mode.label(),
+                config.group_mode.label()
+            ))
+            .build();
+        stack.add_titled(&status, Some("status"), "Overview");
+    } else {
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::Single)
+            .css_classes(["navigation-sidebar"])
+            .build();
+        list.add_css_class("gtaskbar-sidebar");
+
+        for task_list in &lists {
+            let incomplete = crate::sync::scheduler::with_store(|store| {
+                store
+                    .tasks_in_list(task_list.key())
+                    .map(|tasks| tasks.iter().filter(|task| !task.is_completed()).count())
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+
+            let row = adw::ActionRow::builder()
+                .title(&task_list.title)
+                .activatable(true)
+                .build();
+            row.add_prefix(&gtk::Image::from_icon_name("view-list-symbolic"));
+            if incomplete > 0 {
+                let count = gtk::Button::builder()
+                    .label(incomplete.to_string())
+                    .css_classes(["flat", "circular", "suggested-action"])
+                    .valign(gtk::Align::Center)
+                    .build();
+                count.set_sensitive(false);
+                row.add_suffix(&count);
+            }
+            list.append(&row);
+        }
+
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&list)
+            .build();
+        stack.add_titled(&scroller, Some("lists"), "Task lists");
+    }
 
     // A NavigationPage's header is part of its child, so stack the header above
     // the view stack inside a simple vertical box.

@@ -1,4 +1,5 @@
 mod config;
+mod store;
 mod sync;
 mod ui;
 

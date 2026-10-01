@@ -4,6 +4,7 @@ use std::time::Duration;
 use gtk::glib;
 
 use crate::config::Config;
+use crate::store::Store;
 
 /// Minimum interval between two sync attempts, regardless of what the
 /// scheduler timer would otherwise allow. Guards against hammering the API
@@ -13,18 +14,59 @@ const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(15);
 thread_local! {
     static LAST_SYNC: RefCell<Option<i64>> = const { RefCell::new(None) };
     static WINDOW: RefCell<Option<gtk::Window>> = const { RefCell::new(None) };
+    static STORE: RefCell<Option<Store>> = const { RefCell::new(None) };
 }
 
-pub fn init(app: &adw::Application, window: &gtk::Window, config: &Config) {
-    WINDOW.with(|w| *w.borrow_mut() = Some(window.clone()));
+/// The shared task cache.
+///
+/// `Store` wraps a `rusqlite::Connection`, which is not `Sync`, so it lives in
+/// a thread-local rather than a global. Everything in the GTK main loop touches
+/// it on the main thread; the sync worker gets its own connection.
+///
+/// Runs `f` against the shared cache, or returns `None` if it is not open.
+///
+/// Convenience wrapper for read paths in the UI, where "no cache yet" should
+/// degrade to an empty state rather than surface as an error.
+pub fn with_store<T>(f: impl FnOnce(&Store) -> T) -> Option<T> {
+    STORE.with(|slot| slot.borrow().as_ref().map(f))
+}
 
-    // Make sure the data directory exists before anything tries to write to it.
+/// Opens the cache, if it is not open already.
+///
+/// This is separate from `init` because the UI reads from the cache while
+/// building the window: opening it afterwards would leave the first render
+/// reading an empty cache.
+pub fn open_store() {
+    let already_open = STORE.with(|slot| slot.borrow().is_some());
+    if already_open {
+        return;
+    }
+
     if let Err(err) = std::fs::create_dir_all(crate::config::data_dir()) {
         log::warn!(
             "could not create data directory {}: {err}",
             crate::config::data_dir().display()
         );
     }
+
+    match Store::open(&Store::cache_path()) {
+        Ok(store) => {
+            // Surface schema problems and leftover writes at startup rather
+            // than on the first sync.
+            match store.pending_op_count() {
+                Ok(0) => {}
+                Ok(n) => log::info!("{n} pending operation(s) waiting to sync"),
+                Err(err) => log::warn!("could not read the pending queue: {err}"),
+            }
+            STORE.with(|slot| *slot.borrow_mut() = Some(store));
+        }
+        Err(err) => log::error!("could not open the task cache: {err}"),
+    }
+}
+
+pub fn init(app: &adw::Application, window: &gtk::Window, config: &Config) {
+    WINDOW.with(|w| *w.borrow_mut() = Some(window.clone()));
+    open_store();
 
     let minutes = config.poll_interval_minutes.max(1);
     glib::timeout_add_local_once(Duration::from_secs(2), {
