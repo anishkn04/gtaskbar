@@ -11,14 +11,38 @@ use crate::config::Config;
 /// step; this dialog collects and stores the client credentials that it needs,
 /// and explains the setup so the app is usable without a web search.
 pub fn present() {
-    let app = adw::Application::default();
+    let Some(app) = crate::running_app() else {
+        log::error!("no running application to present the connect dialog from");
+        return;
+    };
     if let Some(window) = app
         .windows()
         .first()
         .and_then(|w| w.downcast_ref::<adw::ApplicationWindow>())
     {
         present_for(window.upcast_ref());
+    } else {
+        // A hidden start has no window yet. The dialog is still useful without
+        // a parent, and showing it is what brings the app forward.
+        log::warn!("no main window yet; opening the connect dialog on its own");
+        present_for_standalone();
     }
+}
+
+/// Opens the dialog with no parent window.
+///
+/// `transient_for` needs a parent, so the dialog is simply not modal against one.
+/// This is the path taken when the app was started with `--hidden` and the user
+/// reaches the connect flow from the tray or the main menu before any window has
+/// been built.
+fn present_for_standalone() {
+    let dialog = adw::Window::builder()
+        .title("Connect Google account")
+        .default_width(560)
+        .default_height(620)
+        .build();
+    build_dialog(&dialog);
+    dialog.present();
 }
 
 pub fn present_for(parent: &gtk::Window) {
@@ -30,6 +54,14 @@ pub fn present_for(parent: &gtk::Window) {
         .default_height(620)
         .build();
 
+    build_dialog(&dialog);
+    dialog.present();
+}
+
+/// Fills the dialog with the credential form and the setup instructions.
+///
+/// Shared by the parented and standalone paths so there is one copy of the form.
+fn build_dialog(dialog: &adw::Window) {
     let toolbar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
 
@@ -67,7 +99,7 @@ pub fn present_for(parent: &gtk::Window) {
     steps.add(&step_row(
         "1",
         "Enable the Google Tasks API",
-        "APIs & Services → Library → Google Tasks API → Enable",
+        "APIs &amp; Services → Library → Google Tasks API → Enable",
     ));
     steps.add(&step_row(
         "2",
@@ -78,7 +110,7 @@ pub fn present_for(parent: &gtk::Window) {
     steps.add(&step_row(
         "3",
         "Create a desktop client",
-        "APIs & Services → Credentials → Create credentials → OAuth client ID → Desktop app",
+        "APIs &amp; Services → Credentials → Create credentials → OAuth client ID → Desktop app",
     ));
     page.add(&steps);
 
@@ -172,7 +204,6 @@ pub fn present_for(parent: &gtk::Window) {
 
     toolbar.set_content(Some(&layout));
     dialog.set_content(Some(&toolbar));
-    dialog.present();
 }
 
 fn step_row(number: &str, title: &str, detail: &str) -> adw::ActionRow {
@@ -259,9 +290,18 @@ fn start_authorisation(button: gtk::Button) {
                     // A fresh authorisation should not immediately notify about
                     // everything the account has ever been reminded of.
                     crate::sync::queue::reset_notification_history();
-                    let app = adw::Application::default();
-                    crate::ui::window::rebuild(&app);
-                    crate::sync::scheduler::request_sync(&app);
+                    // Without this the window keeps showing the "Not connected"
+                    // page and no sync is requested, so a successful sign-in
+                    // looks like it did nothing.
+                    match crate::running_app() {
+                        Some(app) => {
+                            crate::ui::window::rebuild(&app);
+                            crate::sync::scheduler::request_sync(&app);
+                        }
+                        None => log::error!(
+                            "authorised, but the running application could not be found, so the                              window was not refreshed"
+                        ),
+                    }
                 }
                 Err(message) => {
                     log::error!("authorisation failed: {message}");
@@ -292,7 +332,10 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
 /// Drives an async future to completion on a fresh runtime.
 ///
 /// The authorisation flow is a one-shot, so a dedicated runtime is simpler than
-/// sharing the sync engine's.
+/// sharing the sync engine's. The future must not touch the keyring: secret-
+/// service builds and `block_on`s a runtime of its own, and doing that from
+/// inside this one aborts the process. `Pending` therefore carries the
+/// credentials, read before this point.
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     match tokio::runtime::Builder::new_current_thread()
         .enable_all()

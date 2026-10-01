@@ -71,6 +71,26 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 
 ### Fixed
 
+- **Signing in crashed the app, so the browser's callback landed on a dead
+  port.** Three defects stacked. First, the token exchange read the OAuth
+  credentials out of the keyring from inside the Tokio runtime driving it, and
+  secret-service builds and `block_on`s a runtime of its own, which aborts with
+  "Cannot start a runtime from within a runtime". The credentials are now read
+  once, on the main thread, and travel with the request. Second, the release
+  profile set `panic = "abort"`, so that worker-thread panic killed the whole
+  process: window, tray icon, and the loopback listener the browser was about
+  to call back into, which is what produced `ERR_CONNECTION_REFUSED`. A
+  background failure is now confined to its thread and the button reports it.
+  Third, the listener was dropped after binding and re-bound later, leaving a
+  window with nothing listening; it is now held open for the whole flow.
+- **The "Connect Google account" button did nothing.** `adw::Application::default()`
+  looks like the running application and is not: the parent type has both an
+  inherent `default()` (the real getter) and a `Default` impl that constructs a
+  brand-new unregistered object, and on the subtype the path resolves to the
+  latter, so every window lookup on it quietly matched nothing. All lookups go
+  through a `running_app()` helper instead, which also fixes the post-sign-in
+  refresh: a successful authorisation used to leave the "Not connected" page on
+  screen and request no sync.
 - **Launching from the app picker did nothing, because there were two identical
   "GTaskbar" entries and the broken one was as easy to click as the working one.**
   The autostart entry was `NoDisplay=false`, so the session's copy of it was

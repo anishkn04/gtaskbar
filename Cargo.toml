@@ -81,4 +81,9 @@ opt-level = 2
 lto = "thin"
 strip = true
 codegen-units = 1
-panic = "abort"
+# Deliberately not panic = "abort". A background thread panicking used to kill
+# the whole process, which for a tray app means an OAuth flow would take down the
+# window, the tray icon and the loopback listener the browser was about to call
+# back into, turning a recoverable error into ERR_CONNECTION_REFUSED. Unwinding
+# confines a failure to the thread that caused it, so the button can report the
+# error and the user can retry.

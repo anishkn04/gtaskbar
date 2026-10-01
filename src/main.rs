@@ -90,6 +90,23 @@ fn load_css() {
 /// There are no short forms, so `-h` keeps meaning `--help`.
 const MAIN_OPTIONS: &[(&str, &str)] = &[("hidden", "Start in the tray without opening a window")];
 
+/// The running application, or `None` before it has been registered.
+///
+/// `adw::Application::default()` looks like it means this and does not.
+/// `gio::Application` has *both* an inherent `default()`, which is the real
+/// `g_application_get_default()`, and a `Default` impl that constructs a
+/// brand-new, unregistered application. Rust does not inherit inherent methods
+/// by subtype, so writing `adw::Application::default()` resolves to the trait
+/// impl: it returns an object with no application id and no windows, and every
+/// `if let Some(window) = app.windows().first()` on it quietly does nothing.
+/// That is not a compile error and not a panic, it is a button that does
+/// nothing at all.
+///
+/// Always go through the inherent method on the parent type and downcast.
+pub fn running_app() -> Option<adw::Application> {
+    gio::Application::default().and_then(|app| app.downcast::<adw::Application>().ok())
+}
+
 fn register_main_options(app: &adw::Application) {
     for (name, description) in MAIN_OPTIONS {
         app.add_main_option(
@@ -374,5 +391,61 @@ mod desktop_entry_tests {
             "install.sh must accept the tarball's flat layout, or the shipped installer fails \
              for exactly the people it was packaged for",
         );
+    }
+}
+
+#[cfg(test)]
+mod application_tests {
+    /// `adw::Application::default()` does not return the running application
+    /// (see `crate::running_app`), and every use of it silently did nothing:
+    /// the sidebar's connect button was dead and a successful sign-in never
+    /// refreshed the window. This pins the ban so it cannot creep back in.
+    /// Doc comments explaining the trap are exempt; code is not.
+    #[test]
+    fn no_code_reaches_for_the_wrong_default_application() {
+        // Built in halves so the test does not match its own source.
+        let needle = concat!("adw::Application::", "default()");
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut offenders = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let contents = std::fs::read_to_string(&path).expect("read source");
+                let used_in_code = contents
+                    .lines()
+                    .any(|line| !line.trim_start().starts_with("//") && line.contains(needle));
+                if used_in_code {
+                    offenders.push(path);
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            concat!(
+                "these files call adw::Application::",
+                "default(), which builds a fresh unregistered application instead of returning \
+                 the running one; use crate::running_app(): {0:?}"
+            ),
+            offenders
+        );
+    }
+
+    /// The helper itself must consult the real default and hand back the
+    /// application type the rest of the code holds. There is no GTK main loop
+    /// in a unit test, so this only pins the lookup chain, not a live window.
+    #[test]
+    fn running_app_finds_nothing_before_startup() {
+        // No application is registered in the test harness, so the helper must
+        // report absence rather than fabricate an empty object, which was the
+        // original failure mode.
+        assert!(super::running_app().is_none());
     }
 }

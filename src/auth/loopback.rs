@@ -14,6 +14,14 @@ use anyhow::{bail, Result};
 /// The listener binds to `127.0.0.1` only, never `0.0.0.0`: the authorisation
 /// code would otherwise be reachable from the network.
 pub struct Loopback {
+    /// Held from `bind` until `wait`.
+    ///
+    /// The socket must stay open across the whole flow. It used to be dropped
+    /// here and re-bound in `wait`, on the assumption that nothing would reach
+    /// the port in between, which left a window with nothing listening on it: a
+    /// browser that came back quickly got ERR_CONNECTION_REFUSED, and the
+    /// re-bind could also fail outright if anything else had taken the port.
+    listener: TcpListener,
     port: u16,
 }
 
@@ -28,13 +36,7 @@ impl Loopback {
             .map_err(|err| anyhow::anyhow!("could not read the bound port: {err}"))?
             .port();
 
-        // The listener is handed to the waiting thread, so keep only the port.
-        // Dropping the handle closes the socket, which is fine because the
-        // waiting thread re-binds nothing: see `wait` below, which re-binds the
-        // same port to avoid the socket being closed in between.
-        drop(listener);
-
-        Ok(Self { port })
+        Ok(Self { listener, port })
     }
 
     /// The bound port, exposed for tests and diagnostics.
@@ -55,23 +57,16 @@ impl Loopback {
     /// `expected_state` is compared against the `state` parameter to block CSRF:
     /// a code delivered for a different request is rejected.
     pub fn wait(self, expected_state: &str) -> Result<Callback> {
-        let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, self.port));
-
-        let listener = TcpListener::bind(address)
-            .map_err(|err| anyhow::anyhow!("could not listen on {}: {err}", self.redirect_uri()))?;
-
-        // A stuck browser must not hang the app forever.
-        listener
-            .set_nonblocking(false)
-            .map_err(|err| anyhow::anyhow!("could not configure the listener: {err}"))?;
-        listener
+        // Non-blocking so the deadline below is honoured; `accept` polls with a
+        // short sleep between attempts.
+        self.listener
             .set_nonblocking(true)
             .map_err(|err| anyhow::anyhow!("could not configure the listener: {err}"))?;
 
         let deadline = std::time::Instant::now() + Duration::from_secs(300);
 
         loop {
-            match listener.accept() {
+            match self.listener.accept() {
                 Ok((stream, _)) => {
                     if let Some(callback) = read_callback(stream, expected_state)? {
                         return Ok(callback);
@@ -259,6 +254,107 @@ mod tests {
             redirect.redirect_uri().starts_with("http://127.0.0.1:"),
             "must stay on the loopback interface, got {}",
             redirect.redirect_uri()
+        );
+    }
+
+    /// The listener used to be dropped in `bind` and re-bound in `wait`, leaving
+    /// a window in which nothing was listening. A browser returning inside that
+    /// window got ERR_CONNECTION_REFUSED, which is exactly what a user sees when
+    /// the callback lands quickly after consent.
+    ///
+    /// The whole flow is driven here, with `wait` on a thread exactly as the
+    /// authorisation worker runs it.
+    #[test]
+    fn a_callback_is_served_within_the_lifetime_of_the_bound_listener() {
+        let redirect = Loopback::bind().expect("bind");
+        let port = redirect.port();
+        let state = "expected-state";
+        let redirect_uri = redirect.redirect_uri();
+
+        let server = std::thread::spawn(move || redirect.wait(state).map(|callback| callback.code));
+
+        // `wait` does not have to have reached `accept` yet. The socket was
+        // bound in `bind`, so the connection cannot be refused either way,
+        // which is the property under test: a refused connection here is the
+        // bug.
+        let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .unwrap_or_else(|err| panic!("the bound port refused a connection: {err}"));
+        stream
+            .write_all(
+                format!("GET /?state={state}&code=the-code HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .as_bytes(),
+            )
+            .expect("write the request");
+
+        // The browser is waiting on this, so a reply must actually arrive.
+        let mut reader = BufReader::new(stream.try_clone().expect("clone the stream for reading"));
+        let mut status = String::new();
+        reader.read_line(&mut status).expect("read the status line");
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "the callback was not answered: {status:?}"
+        );
+        drop(reader);
+        drop(stream);
+        drop(redirect_uri);
+
+        let code = server
+            .join()
+            .expect("the waiting thread panicked")
+            .expect("wait should have completed");
+        assert_eq!(code, "the-code");
+    }
+
+    /// A callback carrying the wrong state must be refused rather than used.
+    #[test]
+    fn a_callback_for_another_request_is_rejected() {
+        let redirect = Loopback::bind().expect("bind");
+        let port = redirect.port();
+
+        let server =
+            std::thread::spawn(move || redirect.wait("the-expected-state").map(|c| c.code));
+
+        let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .expect("connect to the bound port");
+        stream
+            .write_all(b"GET /?state=not-the-expected-one&code=stolen HTTP/1.1\r\n\r\n")
+            .expect("write the request");
+        // A 400 and a closed connection must arrive, not a hang.
+        let mut reader = BufReader::new(stream.try_clone().expect("clone the stream for reading"));
+        let mut status = String::new();
+        reader.read_line(&mut status).expect("read the status line");
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "a state mismatch should be answered 400, got: {status:?}"
+        );
+
+        let outcome = server.join().expect("the waiting thread panicked");
+        assert!(
+            outcome.is_err(),
+            "a code delivered for a different request must not be accepted"
+        );
+    }
+
+    /// A listener that is dropped before `wait` cannot serve the callback, so
+    /// this pins the socket's lifetime to the struct rather than to a re-bind.
+    #[test]
+    fn the_listener_survives_until_wait_takes_it() {
+        let redirect = Loopback::bind().expect("bind");
+        let port = redirect.port();
+
+        // A fresh listener on the same port must fail, proving the original still
+        // holds it rather than having been released.
+        let second = TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind an unrelated port");
+        assert!(second.local_addr().expect("addr").port() != port);
+
+        drop(redirect);
+        // Only now, with the struct gone, is the port free.
+        let reused =
+            TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)));
+        assert!(
+            reused.is_ok(),
+            "the port should be released once the Loopback is dropped"
         );
     }
 

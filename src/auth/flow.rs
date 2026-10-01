@@ -67,6 +67,14 @@ pub struct Pending {
     pub state: String,
     /// The PKCE verifier, needed at the token exchange.
     pub verifier: String,
+    /// Carried rather than re-read at the token exchange.
+    ///
+    /// Reading the keyring builds and `block_on`s a runtime of its own, which
+    /// aborts with "Cannot start a runtime from within a runtime" if it happens
+    /// inside the one driving `finish`. `begin` already read them on the GTK
+    /// main thread, where no runtime is entered, so the value travels with the
+    /// request instead.
+    credentials: ClientCredentials,
     redirect: Loopback,
     /// Kept alongside the listener rather than re-derived, so the value sent to
     /// the token endpoint is byte-for-byte the one sent to the authorize
@@ -96,6 +104,7 @@ pub fn begin() -> Result<Pending> {
         // comparing against it is what blocks a cross-site request forgery.
         state: csrf.secret().clone(),
         verifier: verifier.secret().clone(),
+        credentials,
         redirect,
         redirect_uri,
     })
@@ -136,8 +145,9 @@ fn build_authorize_url(
 /// Blocks until the browser delivers the callback, so this runs on a worker
 /// thread rather than the GTK main loop.
 pub async fn finish(pending: Pending) -> Result<Authorized> {
-    let credentials = ClientCredentials::load()
-        .ok_or_else(|| anyhow!("no OAuth client credentials are configured"))?;
+    // Taken off the request rather than read here: a keyring read inside the
+    // runtime panics, and `begin` has already done it safely.
+    let credentials = pending.credentials.clone();
 
     // Read what the exchange needs before the listener is consumed by `wait`.
     // The state is validated inside `wait`, so an unsolicited or mismatched
