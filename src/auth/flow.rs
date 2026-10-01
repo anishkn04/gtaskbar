@@ -1,6 +1,10 @@
+use std::borrow::Cow;
+
 use anyhow::{anyhow, Result};
 use oauth2::basic::BasicClient;
-use oauth2::{AuthUrl, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, Scope, TokenUrl};
+use oauth2::{
+    AuthUrl, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope, TokenUrl,
+};
 
 use super::credentials::{self, ClientCredentials};
 use super::loopback::Loopback;
@@ -64,12 +68,10 @@ pub struct Pending {
     /// The PKCE verifier, needed at the token exchange.
     pub verifier: String,
     redirect: Loopback,
-}
-
-impl Pending {
-    pub fn redirect_uri(&self) -> String {
-        self.redirect.redirect_uri()
-    }
+    /// Kept alongside the listener rather than re-derived, so the value sent to
+    /// the token endpoint is byte-for-byte the one sent to the authorize
+    /// endpoint. Google rejects the exchange if they differ.
+    redirect_uri: String,
 }
 
 /// Builds the authorisation request.
@@ -83,15 +85,10 @@ pub fn begin() -> Result<Pending> {
         .ok_or_else(|| anyhow!("no OAuth client credentials are configured"))?;
 
     let redirect = Loopback::bind()?;
+    let redirect_uri = redirect.redirect_uri();
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
 
-    // `oauth2` builds the URL because PKCE generation and CSRF state are the
-    // parts where a subtle mistake matters. Everything downstream is ours.
-    let (authorize_url, csrf) = client(&credentials)
-        .authorize_url(CsrfToken::new_random)
-        .set_pkce_challenge(challenge)
-        .add_scope(Scope::new(SCOPE.to_string()))
-        .url();
+    let (authorize_url, csrf) = build_authorize_url(&credentials, &redirect_uri, challenge)?;
 
     Ok(Pending {
         authorize_url: authorize_url.to_string(),
@@ -100,7 +97,38 @@ pub fn begin() -> Result<Pending> {
         state: csrf.secret().clone(),
         verifier: verifier.secret().clone(),
         redirect,
+        redirect_uri,
     })
+}
+
+/// Builds the URL the browser is sent to.
+///
+/// Split out from `begin` so it can be tested with dummy credentials, without a
+/// keyring or a configured account. CI has neither, and a test that skips when
+/// it cannot run is a test that never catches anything.
+fn build_authorize_url(
+    credentials: &ClientCredentials,
+    redirect_uri: &str,
+    challenge: PkceCodeChallenge,
+) -> Result<(oauth2::url::Url, CsrfToken)> {
+    // `oauth2` builds the URL because PKCE generation and CSRF state are the
+    // parts where a subtle mistake matters. Everything downstream is ours.
+    //
+    // `redirect_uri` has to be set explicitly: Google rejects the request
+    // outright with "Missing required parameter: redirect_uri" if it is absent,
+    // and it must be the same value sent to the token endpoint, or the code
+    // exchange fails instead.
+    let (authorize_url, csrf) = client(credentials)
+        .authorize_url(CsrfToken::new_random)
+        .set_redirect_uri(Cow::Owned(
+            RedirectUrl::new(redirect_uri.to_string())
+                .map_err(|err| anyhow!("invalid redirect URI: {err}"))?,
+        ))
+        .set_pkce_challenge(challenge)
+        .add_scope(Scope::new(SCOPE.to_string()))
+        .url();
+
+    Ok((authorize_url, csrf))
 }
 
 /// Completes the flow, exchanging the code for tokens.
@@ -112,11 +140,10 @@ pub async fn finish(pending: Pending) -> Result<Authorized> {
         .ok_or_else(|| anyhow!("no OAuth client credentials are configured"))?;
 
     // Read what the exchange needs before the listener is consumed by `wait`.
-    let redirect_uri = pending.redirect_uri();
-
     // The state is validated inside `wait`, so an unsolicited or mismatched
     // response is rejected before the code is ever used.
     let callback = pending.redirect.wait(&pending.state)?;
+    let redirect_uri = pending.redirect_uri;
 
     let mut form = vec![
         ("grant_type", "authorization_code".to_string()),
@@ -249,6 +276,54 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The parameters Google requires, and without which it refuses the
+    /// request outright. Added after `redirect_uri` was found to be missing,
+    /// which produced a hard "Missing required parameter: redirect_uri" at the
+    /// consent screen. Uses dummy credentials so it runs everywhere, including
+    /// CI, which has neither a keyring nor a configured account.
+    #[test]
+    fn the_authorize_url_carries_every_parameter_google_requires() {
+        let credentials = ClientCredentials {
+            client_id: "id.apps.googleusercontent.com".into(),
+            client_secret: "secret".into(),
+        };
+        let (challenge, _verifier) = PkceCodeChallenge::new_random_sha256();
+        let (url, _csrf) = build_authorize_url(&credentials, "http://127.0.0.1:12345", challenge)
+            .expect("build the authorize URL");
+
+        for parameter in [
+            "client_id",
+            "redirect_uri",
+            "response_type",
+            "scope",
+            "state",
+            "code_challenge",
+            "code_challenge_method",
+        ] {
+            assert!(
+                url.query_pairs().any(|(key, _)| key == parameter),
+                "{parameter} is missing from the authorize URL: {url}"
+            );
+        }
+
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(
+            pairs.get("code_challenge_method").map(|v| v.as_ref()),
+            Some("S256"),
+            "plain PKCE would not protect the code exchange"
+        );
+        assert_eq!(
+            pairs.get("redirect_uri").map(|v| v.as_ref()),
+            Some("http://127.0.0.1:12345"),
+            "the token request must use the same redirect URI"
+        );
+        assert_eq!(
+            pairs.get("scope").map(|v| v.as_ref()),
+            Some(SCOPE),
+            "the read-only scope cannot create or complete tasks"
+        );
     }
 
     #[test]
