@@ -257,22 +257,33 @@ fn handle_tray_event(app: &adw::Application, event: crate::ui::tray::Event) {
 
 /// Public entry point used by the `sync-now` action and the tray menu.
 pub fn request_sync(app: &adw::Application) {
-    let now_micros = glib::monotonic_time();
-    let min_micros = MIN_SYNC_INTERVAL.as_micros() as i64;
-    let too_soon = LAST_SYNC.with(|last| match *last.borrow() {
-        Some(previous) if now_micros - previous < min_micros => true,
-        _ => {
-            *last.borrow_mut() = Some(now_micros);
-            false
-        }
-    });
-
+    let too_soon = LAST_SYNC.with(|last| throttle(last, glib::monotonic_time()));
     if too_soon {
         log::debug!("sync requested too soon after the last one; ignoring");
         return;
     }
 
     spawn_sync(app.clone());
+}
+
+/// Whether a sync requested now must wait, recording the request when not.
+///
+/// The borrow is deliberately short: matching on `*last.borrow()` keeps the
+/// guard alive across the match arms, and taking `borrow_mut()` in one of them
+/// panics with "RefCell already borrowed". That is what used to happen on the
+/// first request after a session restore, killing the app just as signing in
+/// had succeeded.
+fn throttle(last: &RefCell<Option<i64>>, now_micros: i64) -> bool {
+    let min_micros = MIN_SYNC_INTERVAL.as_micros() as i64;
+    // Copied out so the guard is released before any mutation below.
+    let previous = *last.borrow();
+    if let Some(previous) = previous {
+        if now_micros - previous < min_micros {
+            return true;
+        }
+    }
+    *last.borrow_mut() = Some(now_micros);
+    false
 }
 
 /// Kicks off a sync pass on the background runtime.
@@ -369,8 +380,29 @@ fn spawn_sync(app: adw::Application) {
 ///
 /// Runs on its own runtime because it is a one-shot at startup and must not
 /// block the sync worker, which is about to be scheduled separately.
+///
+/// The credentials and the refresh token are read here, on the calling thread,
+/// and moved into the worker. Reading them inside the runtime would abort the
+/// thread: the keyring backend builds a runtime of its own, and entering one
+/// from inside another is fatal, besides poisoning the backend for every
+/// thread after it.
 fn restore_session() {
-    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    // The exchange runs on the worker; persisting runs on the main thread below,
+    // because the keyring must not be touched from inside a runtime.
+    type RestoreOutcome = Result<crate::auth::flow::Authorized, String>;
+    let (tx, rx): (
+        std::sync::mpsc::Sender<RestoreOutcome>,
+        std::sync::mpsc::Receiver<RestoreOutcome>,
+    ) = std::sync::mpsc::channel();
+
+    let Some(credentials) = crate::auth::credentials::ClientCredentials::load() else {
+        log::warn!("could not restore the session: no OAuth client credentials are configured");
+        return;
+    };
+    let Some(refresh_token) = crate::auth::credentials::refresh_token() else {
+        log::warn!("could not restore the session: no refresh token is stored");
+        return;
+    };
 
     if let Err(err) = std::thread::Builder::new()
         .name("gtaskbar-refresh".into())
@@ -386,15 +418,14 @@ fn restore_session() {
                 }
             };
 
-            let outcome = runtime.block_on(async {
-                let authorized = crate::auth::flow::refresh().await?;
-                // Persisting also stores any rotated refresh token, which must
-                // happen before the access token is used for anything.
-                authorized.persist()?;
-                Ok::<(), anyhow::Error>(())
-            });
+            // Only the exchange runs here. Persisting touches the keyring,
+            // which must not happen inside a runtime, so the tokens travel back
+            // over the channel and are stored on the main thread below.
+            let outcome = runtime
+                .block_on(crate::auth::flow::refresh(&credentials, &refresh_token))
+                .map_err(|err| err.to_string());
 
-            let _ = tx.send(outcome.map_err(|err| err.to_string()));
+            let _ = tx.send(outcome);
         })
     {
         log::error!("could not start the token refresh thread: {err}");
@@ -403,8 +434,22 @@ fn restore_session() {
 
     glib::MainContext::default().spawn_local(async move {
         glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-            Ok(Ok(())) => {
-                log::info!("restored the session from the stored refresh token");
+            Ok(Ok(authorized)) => {
+                // Main thread: no runtime is entered here, so the keyring is
+                // safe to touch. Storing a rotated refresh token must happen
+                // before the access token is used for anything.
+                if let Err(err) = authorized.persist() {
+                    log::warn!("restored the session but could not store the token: {err}");
+                } else {
+                    log::info!("restored the session from the stored refresh token");
+                }
+                // The sync that triggered this restore already gave up for lack
+                // of a token; without a nudge nothing would sync until the next
+                // poll interval.
+                match crate::running_app() {
+                    Some(app) => request_sync(&app),
+                    None => log::warn!("session restored but the app is gone; not syncing"),
+                }
                 glib::ControlFlow::Break
             }
             Ok(Err(message)) => {
@@ -460,11 +505,40 @@ fn update_status(app: &adw::Application, message: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
-    use super::MIN_SYNC_INTERVAL;
+    use super::{throttle, MIN_SYNC_INTERVAL};
+    use std::cell::RefCell;
     use std::time::Duration;
 
     #[test]
     fn min_interval_is_long_enough_to_be_a_real_guard() {
         assert!(MIN_SYNC_INTERVAL >= Duration::from_secs(10));
+    }
+
+    /// The first request after a fresh start must not panic: the guard used to
+    /// match on a live borrow and mutate inside one of its arms, which aborted
+    /// with "RefCell already borrowed" exactly when a session restore asked for
+    /// the sync that should have followed a successful sign-in.
+    #[test]
+    fn the_first_request_is_never_throttled_and_never_panics() {
+        let last = RefCell::new(None);
+        assert!(!throttle(&last, 1_000_000));
+        assert_eq!(*last.borrow(), Some(1_000_000));
+    }
+
+    #[test]
+    fn a_request_inside_the_interval_is_throttled_without_recording() {
+        let last = RefCell::new(None);
+        assert!(!throttle(&last, 1_000_000));
+        assert!(throttle(&last, 1_000_001));
+        assert_eq!(*last.borrow(), Some(1_000_000));
+    }
+
+    #[test]
+    fn a_request_after_the_interval_goes_through() {
+        let last = RefCell::new(None);
+        assert!(!throttle(&last, 1_000_000));
+        let later = 1_000_000 + MIN_SYNC_INTERVAL.as_micros() as i64;
+        assert!(!throttle(&last, later));
+        assert_eq!(*last.borrow(), Some(later));
     }
 }

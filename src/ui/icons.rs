@@ -36,8 +36,6 @@ pub const APP_SYMBOLIC: &str = "gtaskbar-symbolic";
 pub const LIST: &str = "view-list-symbolic";
 /// App menu button.
 pub const MENU: &str = "open-menu-symbolic";
-/// Window close button.
-pub const CLOSE: &str = "window-close-symbolic";
 /// Preferences entry.
 pub const SETTINGS: &str = "preferences-system-symbolic";
 /// Completion tick on a finished task.
@@ -69,9 +67,9 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    fn all() -> [&'static str; 13] {
+    fn all() -> [&'static str; 12] {
         [
-            LIST, MENU, CLOSE, SETTINGS, CHECK, ADD, SYNC, ACCOUNT, TODAY, UPCOMING, OVERDUE, ALL,
+            LIST, MENU, SETTINGS, CHECK, ADD, SYNC, ACCOUNT, TODAY, UPCOMING, OVERDUE, ALL,
             COMPLETED,
         ]
     }

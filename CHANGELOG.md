@@ -83,6 +83,25 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
   background failure is now confined to its thread and the button reports it.
   Third, the listener was dropped after binding and re-bound later, leaving a
   window with nothing listening; it is now held open for the whole flow.
+- **Signing in still crashed the app after the browser said success, and the
+  account was lost with it.** The startup token refresh read the keyring from
+  inside the sync runtime and died there, which poisoned the backend's
+  process-global lock; the persist that followed then panicked on the poisoned
+  mutex on the main thread, inside a GTK callback that cannot unwind, so the
+  whole app aborted after the tokens had arrived but before they were stored.
+  No async code touches the keyring anymore: the refresh takes its values as
+  parameters, the restore reads them before spawning, persist runs only on the
+  main thread, and any keyring call attempted from inside a runtime is refused
+  with an ordinary error instead of poisoning. The restore now also triggers
+  the sync it previously left for the next poll interval.
+- **The first sync after signing in crashed the app instead.** The throttle
+  matched on a live `RefCell` borrow and mutated inside one of its arms, which
+  panics with "RefCell already borrowed" on the very first request. It had never
+  fired only because nothing had reached it before. The decision is now a small
+  tested function.
+- **The connect dialog had two close buttons.** A custom one was packed next to
+  the header bar's native window controls. It now relies on the native ones,
+  which go through the same close path as everywhere else.
 - **The "Connect Google account" button did nothing.** `adw::Application::default()`
   looks like the running application and is not: the parent type has both an
   inherent `default()` (the real getter) and a `Default` impl that constructs a

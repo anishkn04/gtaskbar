@@ -11,6 +11,20 @@ const USER_CLIENT_SECRET: &str = "oauth-client-secret";
 const USER_REFRESH_TOKEN: &str = "oauth-refresh-token";
 
 fn entry(user: &str) -> Result<keyring::Entry> {
+    // The secret-service backend builds and `block_on`s a Tokio runtime of its
+    // own. Doing that from inside a runtime aborts the calling thread, and
+    // worse, it poisons the backend's process-global lock, so every later
+    // keyring call on any thread panics on the poisoned mutex instead. That is
+    // how a successful sign-in used to kill the app: the token refresh ran
+    // inside the sync runtime, and the persist that followed died on the main
+    // thread. Refuse loudly instead of poisoning: callers must read what they
+    // need before entering async code and carry it in.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        anyhow::bail!(
+            "keyring access from inside an async runtime would abort the process; \
+             read the credential beforehand and pass it in"
+        );
+    }
     keyring::Entry::new(SERVICE, user).map_err(|err| anyhow!("keyring unavailable: {err}"))
 }
 

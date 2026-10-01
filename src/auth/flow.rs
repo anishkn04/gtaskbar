@@ -177,15 +177,15 @@ pub async fn finish(pending: Pending) -> Result<Authorized> {
 }
 
 /// Refreshes the access token using the stored refresh token.
-pub async fn refresh() -> Result<Authorized> {
-    let credentials = ClientCredentials::load()
-        .ok_or_else(|| anyhow!("no OAuth client credentials are configured"))?;
-    let refresh_token =
-        credentials::refresh_token().ok_or_else(|| anyhow!("no refresh token is stored"))?;
-
+///
+/// Both values are taken as parameters rather than read here because this runs
+/// inside the sync runtime, and a keyring read from inside a runtime aborts
+/// the calling thread and poisons the backend for every thread after it. The
+/// caller reads them beforehand, where no runtime is entered.
+pub async fn refresh(credentials: &ClientCredentials, refresh_token: &str) -> Result<Authorized> {
     let mut form = vec![
         ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh_token.clone()),
+        ("refresh_token", refresh_token.to_string()),
         ("client_id", credentials.client_id.clone()),
     ];
     if !credentials.client_secret.trim().is_empty() {
@@ -200,7 +200,7 @@ pub async fn refresh() -> Result<Authorized> {
             .ok_or_else(|| anyhow!("the refresh response contained no access token"))?,
         // Google only sometimes issues a replacement refresh token. When it does
         // not, the existing one stays valid and must be kept rather than lost.
-        refresh_token: token.refresh_token.or(Some(refresh_token)),
+        refresh_token: token.refresh_token.or(Some(refresh_token.to_string())),
     })
 }
 
@@ -336,36 +336,51 @@ mod tests {
         );
     }
 
-    /// `finish` runs inside the Tokio runtime driving the authorisation, and a
-    /// keyring read builds and `block_on`s a runtime of its own, which aborts
-    /// the process when entered from inside one. The credentials must therefore
-    /// be read once, at `begin` on the main thread, and travel on `Pending`.
-    /// This pins that shape: `finish` takes them off the request and must not
-    /// reach for the keyring itself.
+    /// `finish` runs inside the Tokio runtime driving the authorisation, and
+    /// `refresh` runs inside the sync runtime. A keyring read builds and
+    /// `block_on`s a runtime of its own, which aborts the calling thread when
+    /// entered from inside one, and poisons the backend's process-global lock
+    /// so every later keyring call on any thread panics too. That cascade is
+    /// how a successful sign-in used to kill the app on the main thread. Both
+    /// functions must therefore take what they need as parameters, read
+    /// beforehand where no runtime is entered, and never reach for the keyring
+    /// themselves.
     #[test]
-    fn finish_takes_credentials_off_the_request_rather_than_the_keyring() {
+    fn async_auth_functions_take_credentials_as_parameters() {
         let source = include_str!("flow.rs");
-        let start = source
-            .find("pub async fn finish")
-            .expect("finish must exist");
-        let body = &source[start..];
-        let end = body.find("\n}\n").expect("finish must end at column zero");
-        let body = &body[..end];
 
-        for forbidden in [
-            "ClientCredentials::load",
-            "credentials::refresh_token",
-            "credentials::store_refresh_token",
-        ] {
+        let bodies = [
+            ("finish", "pending.credentials"),
+            ("refresh", "credentials"),
+        ];
+        for (name, evidence) in bodies {
+            let marker = format!("pub async fn {name}");
+            let start = source.find(&marker).unwrap_or_else(|| {
+                panic!("{name} must exist");
+            });
+            let body = &source[start..];
+            let end = body
+                .find("\n}\n")
+                .expect("function must end at column zero");
+            let body = &body[..end];
+
+            for forbidden in [
+                "ClientCredentials::load",
+                "credentials::refresh_token",
+                "credentials::store_refresh_token",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "{name}() reaches for the keyring via {forbidden}, which aborts the calling \
+                     thread from inside a runtime and poisons the backend for every thread \
+                     after it; pass the value in instead"
+                );
+            }
             assert!(
-                !body.contains(forbidden),
-                "finish() reaches for the keyring via {forbidden}, which aborts the process                  from inside the authorisation runtime; take it off Pending instead"
+                body.contains(evidence),
+                "{name}() must use the credentials passed to it"
             );
         }
-        assert!(
-            body.contains("pending.credentials"),
-            "finish() must use the credentials carried on Pending"
-        );
     }
 
     #[test]

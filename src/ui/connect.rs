@@ -65,15 +65,10 @@ fn build_dialog(dialog: &adw::Window) {
     let toolbar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
 
-    let close = gtk::Button::from_icon_name(icons::CLOSE);
-    close.set_tooltip_text(Some("Close"));
-    close.connect_clicked(glib::clone!(
-        #[weak]
-        dialog,
-        move |_| dialog.close()
-    ));
-    header.pack_start(&close);
-
+    // No custom close button: the header bar already carries the window
+    // controls, and a second one next to them is what users report as "two
+    // crosses". Closing through the native controls goes through the same
+    // close-request path as everywhere else, so close-to-tray keeps working.
     toolbar.add_top_bar(&header);
 
     let page = adw::PreferencesPage::builder()
@@ -180,8 +175,8 @@ fn build_dialog(dialog: &adw::Window) {
     // credential fields out of view, so the placeholder note is plain text.
     let note = gtk::Label::builder()
         .label(
-            "The PKCE loopback flow is the next milestone. Set GTASKBAR_CLIENT_ID and \
-                GTASKBAR_CLIENT_SECRET to use your credentials in the meantime.",
+            "Authorise opens your browser, and Google sends the result straight \
+                back to the app. Nothing is pasted anywhere by hand.",
         )
         .wrap(true)
         .justify(gtk::Justification::Center)
