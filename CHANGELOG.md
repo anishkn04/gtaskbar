@@ -53,11 +53,40 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 - `install.sh` with `--no-build` and `--uninstall`, installing into `~/.local`
   along with the desktop entry, the full icon set and an autostart entry.
 
+### Added
+
+- **Tray icon.** A StatusNotifierItem via `ksni`, which is pure Rust over D-Bus;
+  the `tray-icon` crate's `libappindicator` feature needs a package that is not
+  installed here. The icon is a themed symbolic name rather than a pixmap, so it
+  is recoloured by the shell. It carries an attention state and a tooltip while
+  tasks are due today or overdue, and re-registers itself if the shell drops it.
+- **Close-to-tray that degrades correctly.** Closing the window hides to the tray
+  only when a tray is actually registered, so a session with no
+  status-notifier host quits instead of becoming unreachable.
+- **Ctrl+W** closes the window through the same `close-request` path as the
+  window button, so it also respects the hide-or-quit decision.
+
 ### Fixed
 
 - A task could be shown in the Completed view while still being open.
 - Sidebar membership was inferred from parent links rather than letting the
   store scope the query, which put every task in every list.
+- **OAuth failed outright with "Missing required parameter: redirect_uri".**
+  `redirect_uri` was never set on the authorize request, so Google rejected it
+  before showing the consent screen. The redirect URI is now also held on the
+  pending flow rather than re-derived, so the value sent to the token endpoint
+  is byte-for-byte the one sent to the authorize endpoint. Covered by a test
+  that asserts every parameter Google requires, and which runs in CI.
+- **Notification action buttons would not have worked.** GIO routes notification
+  actions by `app.`-prefixed name and logs a warning for anything else; the
+  Complete button used an unprefixed name, which looks correct and silently does
+  nothing. The task id is now passed as the action's target value.
+- **Sidebar count badges and due chips filled their whole row.** A label in a box
+  fills it by default, and `AdwActionRow`'s suffix area fills its child
+  vertically regardless of the child's own `valign`, so neither styling nor an
+  explicit height request could shrink them. The sidebar row is now composed
+  explicitly instead of using `AdwActionRow`, which the suffix area was the only
+  reason for. Both elements are also substantially smaller than before.
 - A hand-authored symbolic icon set rendered as solid blobs, and its thin-line
   icons were invisible on a dark background, because GTK neither preserves
   `fill="none"` nor reads `currentColor`. Replaced with upstream GNOME icons,
