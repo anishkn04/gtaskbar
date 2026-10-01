@@ -1,6 +1,8 @@
 mod api;
 mod auth;
 mod config;
+mod model;
+mod notify;
 mod store;
 mod sync;
 mod ui;
@@ -74,6 +76,12 @@ pub fn register_actions(app: &adw::Application) {
         })
         .build();
 
+    let search = gio::ActionEntry::builder("search")
+        .activate(|app: &adw::Application, _, _| {
+            ui::window::focus_search(app);
+        })
+        .build();
+
     let show_window = gio::ActionEntry::builder("show-window")
         .activate(|app: &adw::Application, _, _| ui::window::present(app))
         .build();
@@ -92,8 +100,21 @@ pub fn register_actions(app: &adw::Application) {
 
     let disconnect = gio::ActionEntry::builder("disconnect-account")
         .activate(|app: &adw::Application, _, _| {
-            auth::session::clear();
-            log::info!("disconnected; cached tasks left in place until the next clear");
+            // Drops the refresh token from the keyring as well as the in-memory
+            // access token, so the next authorisation starts from scratch.
+            auth::flow::sign_out();
+
+            // Cached tasks belong to the account that was just disconnected, so
+            // leaving them would show one account's data after switching to
+            // another.
+            match store::Store::open(&store::Store::cache_path()) {
+                Ok(cache) => match cache.clear_all() {
+                    Ok(()) => log::info!("disconnected and cleared the local cache"),
+                    Err(err) => log::error!("disconnected, but could not clear the cache: {err}"),
+                },
+                Err(err) => log::error!("disconnected, but the cache could not be opened: {err}"),
+            }
+
             ui::window::rebuild(app);
         })
         .build();
@@ -107,6 +128,7 @@ pub fn register_actions(app: &adw::Application) {
         about,
         sync_now,
         add_task,
+        search,
         show_window,
         connect,
         disconnect,

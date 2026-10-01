@@ -71,11 +71,6 @@ impl TasksClient {
         })
     }
 
-    /// Replaces the access token, as happens after a refresh.
-    pub fn set_token(&mut self, token: String) {
-        self.token = token;
-    }
-
     fn spend_query(&mut self) -> Result<()> {
         let today = chrono::Local::now().date_naive();
         if today != self.day_started {
@@ -424,13 +419,6 @@ mod tests {
     fn a_client_can_be_built_with_a_token() {
         let client = TasksClient::new("token".into()).expect("build client");
         assert_eq!(client.token, "token");
-    }
-
-    #[test]
-    fn replacing_the_token_takes_effect() {
-        let mut client = TasksClient::new("old".into()).expect("build client");
-        client.set_token("new".into());
-        assert_eq!(client.token, "new");
     }
 
     #[test]
