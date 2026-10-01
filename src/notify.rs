@@ -43,7 +43,9 @@ pub fn register_actions(app: &adw::Application) {
             };
             let task_id = task_id.to_string();
 
-            crate::sync::queue::set_status(&task_id, TaskStatus::Completed);
+            if let Err(reason) = crate::sync::queue::set_status(&task_id, TaskStatus::Completed) {
+                log::warn!("{reason}");
+            }
             crate::sync::scheduler::request_sync(app);
 
             // Re-sending under the same id replaces the notification rather than

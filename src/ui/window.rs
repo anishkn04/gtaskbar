@@ -212,7 +212,13 @@ pub fn allow_close() {
 /// only its own rows via `tasks_in_list`. The store already scopes by list, so
 /// the UI never has to infer membership by hand.
 struct Snapshot {
-    lists: Vec<(String, String)>,
+    /// One entry per account list: id, title, and its own outstanding count.
+    ///
+    /// The count is computed per list here rather than in the sidebar, because
+    /// counting the whole task slice once per row shows every list's badge as
+    /// the account total. That is how an empty list ended up badged with
+    /// another list's tasks.
+    lists: Vec<(String, String, usize)>,
     smart_tasks: Vec<crate::store::models::Task>,
 }
 
@@ -235,15 +241,24 @@ fn snapshot() -> Snapshot {
     })
     .unwrap_or_default();
 
-    Snapshot {
-        lists: lists
-            .into_iter()
-            // `key` is the model's own identifier accessor, used here so the
-            // sidebar and the content stack agree on what identifies a list.
-            .map(|list| (list.key().to_string(), list.title))
-            .collect(),
-        smart_tasks,
-    }
+    let lists: Vec<(String, String, usize)> = lists
+        .into_iter()
+        // `key` is the model's own identifier accessor, used here so the
+        // sidebar and the content stack agree on what identifies a list.
+        .map(|list| {
+            let id = list.key().to_string();
+            let open = crate::sync::scheduler::with_store(|store| {
+                store
+                    .tasks_in_list(&id)
+                    .map(|tasks| tasks.iter().filter(|task| !task.is_completed()).count())
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+            (id, list.title, open)
+        })
+        .collect();
+
+    Snapshot { lists, smart_tasks }
 }
 
 fn tasks_for(view: &crate::model::view::View, snap: &Snapshot) -> Vec<crate::store::models::Task> {
@@ -285,7 +300,7 @@ fn build_ui(_config: &Config) -> adw::NavigationSplitView {
     views.extend(
         snap.lists
             .iter()
-            .map(|(id, _)| crate::model::view::View::List(id.clone())),
+            .map(|(id, _, _)| crate::model::view::View::List(id.clone())),
     );
 
     let mut panes = Vec::with_capacity(views.len());
@@ -295,8 +310,8 @@ fn build_ui(_config: &Config) -> adw::NavigationSplitView {
             crate::model::view::View::List(id) => snap
                 .lists
                 .iter()
-                .find(|(candidate, _)| candidate == id)
-                .map(|(_, name)| name.clone())
+                .find(|(candidate, _, _)| candidate == id)
+                .map(|(_, name, _)| name.clone())
                 .unwrap_or_else(|| "Tasks".to_string()),
             other => other.title(),
         };

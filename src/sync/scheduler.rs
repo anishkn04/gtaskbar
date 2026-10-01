@@ -352,6 +352,19 @@ fn spawn_sync(app: adw::Application) {
                         } else {
                             log::info!("{message}");
                         }
+                        // A sync that changed or pushed anything must repaint:
+                        // flushed quick-adds and remote edits otherwise sit in
+                        // the cache invisibly until something else rebuilds.
+                        // Failures still repaint what did arrive, since a
+                        // partial sync beats a stale screen; only a total
+                        // failure leaves the view alone.
+                        let changed = match &outcome {
+                            Ok(report) => report.tasks_changed > 0 || report.pending_flushed > 0,
+                            Err(_) => false,
+                        };
+                        if changed && !crate::ui::tasklist_view::any_quick_add_has_text() {
+                            crate::ui::window::rebuild(&app);
+                        }
                         crate::ui::window::set_status(&app, None);
                         refresh_tray_attention();
                         glib::ControlFlow::Break

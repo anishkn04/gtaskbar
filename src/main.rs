@@ -3,6 +3,7 @@ use std::cell::Cell;
 mod api;
 mod auth;
 mod config;
+mod logfile;
 mod model;
 mod notify;
 mod store;
@@ -18,8 +19,9 @@ fn main() -> glib::ExitCode {
     gio::resources_register_include!("gtaskbar.gresource")
         .expect("failed to register GResource bundle");
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("gtaskbar=info"))
-        .init();
+    // First, so even startup failures land somewhere readable: a picker
+    // launch has no terminal to show stderr on.
+    logfile::init();
 
     let app = adw::Application::builder()
         .application_id("dev.anishkn04.gtaskbar")

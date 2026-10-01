@@ -29,7 +29,12 @@ impl Entry {
 ///
 /// Smart views come first because they are the ones people reach for daily;
 /// the account's own lists follow under a heading.
-pub fn entries(tasks: &[Task], list_names: &[(String, String)]) -> Vec<Entry> {
+///
+/// Each list arrives with its own outstanding count, computed by the caller
+/// from that list's tasks. Counting the whole slice once per row used to show
+/// every list badged with the account total, so an empty list wore another
+/// list's number.
+pub fn entries(tasks: &[Task], lists: &[(String, String, usize)]) -> Vec<Entry> {
     let today = view::today();
 
     let mut smart = vec![
@@ -49,13 +54,12 @@ pub fn entries(tasks: &[Task], list_names: &[(String, String)]) -> Vec<Entry> {
 
     let mut out = smart;
 
-    for (id, name) in list_names {
-        let count = tasks.iter().filter(|task| !task.is_completed()).count();
+    for (id, name, count) in lists {
         out.push(Entry {
             view: View::List(id.clone()),
             title: name.clone(),
             icon: icons::LIST,
-            count,
+            count: *count,
         });
     }
 
@@ -68,14 +72,14 @@ pub fn entries(tasks: &[Task], list_names: &[(String, String)]) -> Vec<Entry> {
 /// Each row's widget name is its view's key, which is how the selection handler
 /// in `window.rs` finds the matching content page without having to rediscover
 /// the mapping by walking the widget tree.
-pub fn build(tasks: &[Task], list_names: &[(String, String)]) -> gtk::ListBox {
+pub fn build(tasks: &[Task], lists: &[(String, String, usize)]) -> gtk::ListBox {
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
         .css_classes(["navigation-sidebar"])
         .build();
     list.add_css_class("gtaskbar-sidebar");
 
-    let entries = entries(tasks, list_names);
+    let entries = entries(tasks, lists);
     let smart_count = entries
         .iter()
         .filter(|e| !matches!(e.view, View::List(_)))
@@ -173,8 +177,10 @@ pub fn task_row(task: &Task, subtask_depth: u32) -> adw::ActionRow {
         "Mark as done"
     }));
 
-    // Clicking the box queues the change; the row re-renders from the cache,
-    // so the checkbox is not toggled here directly.
+    // Clicking the box queues the change and applies it to the cache, then
+    // repaints and syncs, so the tick responds at once instead of flipping
+    // back on the next repaint. A failure keeps the old state and says so
+    // rather than silently doing nothing.
     let task_id = task.id.clone();
     let was_completed = task.is_completed();
     check.connect_toggled(move |button| {
@@ -186,7 +192,21 @@ pub fn task_row(task: &Task, subtask_depth: u32) -> adw::ActionRow {
         } else {
             TaskStatus::NeedsAction
         };
-        crate::sync::queue::set_status(&task_id, next);
+        match crate::sync::queue::set_status(&task_id, next) {
+            Ok(()) => {
+                if let Some(app) = crate::running_app() {
+                    crate::ui::window::rebuild(&app);
+                    crate::sync::scheduler::request_sync(&app);
+                }
+            }
+            Err(reason) => {
+                log::warn!("{reason}");
+                if let Some(app) = crate::running_app() {
+                    crate::ui::window::set_status(&app, Some(&reason));
+                    crate::ui::window::rebuild(&app);
+                }
+            }
+        }
     });
 
     if task.is_completed() {
@@ -365,13 +385,17 @@ const TASK_ROW_PREFIX: &str = "gtaskbar-task:";
 pub fn register_actions(window: &adw::ApplicationWindow) {
     use gtk::gio;
 
+    // Every menu write repaints, syncs now, and says so on failure. A queued
+    // change that stays invisible until the next poll reads as a dead menu.
     let due_today = gio::ActionEntry::builder("due-today")
         .activate(|window: &adw::ApplicationWindow, _, _| {
             let Some(id) = target_task(window) else {
                 return;
             };
-            crate::sync::queue::set_due(&id, Some(view::today()));
-            refresh(window);
+            apply_menu_write(
+                window,
+                crate::sync::queue::set_due(&id, Some(view::today())),
+            );
         })
         .build();
 
@@ -381,8 +405,7 @@ pub fn register_actions(window: &adw::ApplicationWindow) {
                 return;
             };
             let tomorrow = view::today() + chrono::Duration::days(1);
-            crate::sync::queue::set_due(&id, Some(tomorrow));
-            refresh(window);
+            apply_menu_write(window, crate::sync::queue::set_due(&id, Some(tomorrow)));
         })
         .build();
 
@@ -392,8 +415,7 @@ pub fn register_actions(window: &adw::ApplicationWindow) {
                 return;
             };
             // `None` means "clear", which the API needs as an explicit null.
-            crate::sync::queue::set_due(&id, None);
-            refresh(window);
+            apply_menu_write(window, crate::sync::queue::set_due(&id, None));
         })
         .build();
 
@@ -402,8 +424,7 @@ pub fn register_actions(window: &adw::ApplicationWindow) {
             let Some(id) = target_task(window) else {
                 return;
             };
-            crate::sync::queue::delete_task(&id);
-            refresh(window);
+            apply_menu_write(window, crate::sync::queue::delete_task(&id));
         })
         .build();
 
@@ -419,6 +440,25 @@ pub fn register_actions(window: &adw::ApplicationWindow) {
         .build();
 
     window.add_action_entries([due_today, due_tomorrow, clear_due, delete_task, edit_task]);
+}
+
+/// Settles a menu-initiated write: repaint and sync on success, say so on
+/// failure. The queue functions already applied the change to the cache, so
+/// the repaint shows it at once instead of waiting for the next sync.
+fn apply_menu_write(window: &adw::ApplicationWindow, outcome: Result<(), String>) {
+    let ok = outcome.is_ok();
+    if let Err(reason) = outcome {
+        log::warn!("{reason}");
+        if let Some(app) = crate::running_app() {
+            crate::ui::window::set_status(&app, Some(&reason));
+        }
+    }
+    refresh(window);
+    if ok {
+        if let Some(app) = crate::running_app() {
+            crate::sync::scheduler::request_sync(&app);
+        }
+    }
 }
 
 /// Re-reads the cache and repaints, so a queued change appears immediately.
@@ -456,7 +496,7 @@ mod tests {
 
     #[test]
     fn smart_views_come_before_lists() {
-        let names = vec![("@a".to_string(), "My Tasks".to_string())];
+        let names = vec![("@a".to_string(), "My Tasks".to_string(), 0)];
         let built = entries(&[], &names);
 
         let list_positions: Vec<usize> = built
@@ -496,19 +536,36 @@ mod tests {
     }
 
     #[test]
-    fn a_list_entry_counts_only_its_own_open_tasks() {
-        // The caller scopes the tasks to the list, so the count is over the
-        // supplied slice.
+    fn a_list_entry_carries_its_own_count() {
+        // The count arrives scoped to the list by the caller. Counting the
+        // whole slice once per row used to badge every list with the account
+        // total, so an empty list wore another list's number while showing
+        // "Nothing here".
         let tasks = vec![
             task("a", None, TaskStatus::NeedsAction),
-            task("b", None, TaskStatus::Completed),
+            task("b", None, TaskStatus::NeedsAction),
+            task("c", None, TaskStatus::NeedsAction),
         ];
-        let built = entries(&tasks, &[("@a".into(), "My Tasks".into())]);
+        let built = entries(&tasks, &[("@a".into(), "My Tasks".into(), 0)]);
         let list_entry = built
             .iter()
             .find(|e| matches!(e.view, View::List(_)))
             .expect("list entry");
-        assert_eq!(list_entry.count, 1, "a completed task is not outstanding");
+        assert_eq!(
+            list_entry.count, 0,
+            "an empty list must show no badge even when other lists have open tasks"
+        );
+    }
+
+    #[test]
+    fn a_nonempty_list_entry_shows_its_count() {
+        let tasks = vec![task("a", None, TaskStatus::NeedsAction)];
+        let built = entries(&tasks, &[("@a".into(), "My Tasks".into(), 1)]);
+        let list_entry = built
+            .iter()
+            .find(|e| matches!(e.view, View::List(_)))
+            .expect("list entry");
+        assert_eq!(list_entry.count, 1);
     }
 
     #[test]

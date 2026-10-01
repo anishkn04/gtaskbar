@@ -26,6 +26,11 @@ thread_local! {
     // what lets `app.add-task` and the search field act on whichever view is
     // showing, without the window having to plumb a handle to every callback.
     static PANES: RefCell<Vec<TaskListView>> = const { RefCell::new(Vec::new()) };
+    /// Set by the key controller when its submit fails, so an `apply` from
+    /// the same press stands down instead of reporting the same failure
+    /// twice. A successful submit clears the entry, which already stops
+    /// `apply`; this covers only the failure case, where the text is kept.
+    static SUBMIT_FAILED: RefCell<bool> = const { RefCell::new(false) };
 }
 
 pub fn register_panes(panes: Vec<TaskListView>) {
@@ -47,6 +52,20 @@ pub fn focus_quick_add() {
     if let Some(pane) = visible_pane() {
         pane.focus_quick_add();
     }
+}
+
+/// Whether any pane's quick-add holds unsubmitted text.
+///
+/// A background sync that changed tasks triggers a repaint, but rebuilding
+/// while the user is mid-sentence would destroy the entry widget and eat what
+/// they typed. Callers skip the repaint in that case; the next sync or any
+/// manual refresh picks the changes up.
+pub fn any_quick_add_has_text() -> bool {
+    PANES.with(|slot| {
+        slot.borrow()
+            .iter()
+            .any(|pane| !pane.quick_add.text().trim().is_empty())
+    })
 }
 
 /// Moves keyboard focus to the search field of the visible pane.
@@ -89,19 +108,44 @@ impl TaskListView {
         let quick_add = adw::EntryRow::builder().title("Add a task").build();
         quick_add.add_css_class("gtaskbar-quick-add");
 
-        // The entry is passed to the handler, so capturing it by weak
-        // reference as well would be redundant.
+        // Return and keypad Enter submit, whatever the modifiers: this is a
+        // single-line field, so there is no newline to protect.
+        //
+        // This controller exists because `apply` does not fire on this system's
+        // libadwaita: the key provably reaches the row, but the row never emits
+        // the signal, so relying on it alone leaves Enter dead. The controller
+        // runs in the capture phase, before the entry's own handling, because
+        // the entry consumes Return without emitting `apply`: a bubble-phase
+        // controller provably never runs here. A successful submit clears the
+        // entry, so a later `apply` from the same press (on systems where it
+        // does fire) sees empty text and stands down; a failed submit sets a
+        // flag the `apply` handler yields to, so failures report once.
+        //
+        // Known trade-off: with an IME composing, this submits on the first
+        // Enter rather than only committing the composition. A dead Enter for
+        // everyone beats a perfect one for IME users, and the common Latin case
+        // is unaffected either way.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let row = quick_add.downgrade();
+        keys.connect_key_pressed(move |_, keyval, _, _| {
+            let submit_key = matches!(keyval.name().as_deref(), Some("Return" | "KP_Enter"));
+            if !submit_key {
+                return gtk::glib::Propagation::Proceed;
+            }
+            if let Some(entry) = row.upgrade() {
+                let failed = !submit_quick_add(&entry);
+                SUBMIT_FAILED.with(|flag| *flag.borrow_mut() = failed);
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        quick_add.add_controller(keys);
+
         quick_add.connect_apply(move |entry| {
-            let text = entry.text().trim().to_string();
-            if text.is_empty() {
+            if SUBMIT_FAILED.take() {
                 return;
             }
-            if crate::auth::session::is_connected() {
-                crate::sync::queue::create_task(text);
-            } else {
-                log::info!("no account connected; not adding {text:?}");
-            }
-            entry.set_text("");
+            submit_quick_add(entry);
         });
 
         // --- list ------------------------------------------------------
@@ -197,6 +241,14 @@ impl TaskListView {
             .set_visible_child_name(if rendered == 0 { "empty" } else { "list" });
     }
 
+    /// The list this pane shows, if it shows one list rather than a smart view.
+    pub fn list_id(&self) -> Option<String> {
+        match &self.view {
+            View::List(id) => Some(id.clone()),
+            _ => None,
+        }
+    }
+
     pub fn focus_search(&self) {
         self.search.grab_focus();
     }
@@ -269,6 +321,59 @@ impl TaskListView {
             current = widget.first_child();
         }
         rows
+    }
+}
+
+/// Submits the quick-add entry: queue the task, confirm, and sync now.
+///
+/// Shared by the `apply` handler and the key controller, which exists because
+/// `apply` does not fire on this system's libadwaita even though the key
+/// provably reaches the row.
+fn submit_quick_add(entry: &adw::EntryRow) -> bool {
+    log::debug!("quick-add submit");
+    let text = entry.text().trim().to_string();
+    if text.is_empty() {
+        log::debug!("quick-add text empty; ignoring");
+        return true;
+    }
+    let connected = crate::auth::session::is_connected();
+    log::debug!("quick-add connected={connected}");
+    if !connected {
+        log::info!("no account connected; not adding {text:?}");
+        if let Some(app) = crate::running_app() {
+            crate::ui::window::set_status(&app, Some("Connect your Google account first"));
+        }
+        return false;
+    }
+    // The pane the user typed in is the list they meant. Smart views
+    // have no list of their own, so those fall back to the default.
+    let preferred = visible_pane().and_then(|pane| pane.list_id());
+    log::debug!("quick-add preferred list={preferred:?}");
+    match crate::sync::queue::create_task(text, preferred) {
+        Ok(list_name) => {
+            log::debug!("quick-add queued for {list_name:?}");
+            entry.set_text("");
+            if let Some(app) = crate::running_app() {
+                crate::ui::window::set_status(
+                    &app,
+                    Some(&format!("Added to {list_name} — syncing…")),
+                );
+                // Flush now rather than at the next poll, or the task
+                // sits invisibly for minutes. The sync completion
+                // repaints, which is what makes it appear.
+                crate::sync::scheduler::request_sync(&app);
+            }
+            true
+        }
+        Err(reason) => {
+            log::info!("quick-add failed: {reason}");
+            // The text stays so nothing the user typed is lost to a
+            // failure they can retry.
+            if let Some(app) = crate::running_app() {
+                crate::ui::window::set_status(&app, Some(&reason));
+            }
+            false
+        }
     }
 }
 

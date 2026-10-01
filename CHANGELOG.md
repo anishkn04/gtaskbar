@@ -71,6 +71,35 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 
 ### Fixed
 
+- **List badges showed the account total on every list.** Each row counted all
+  open tasks instead of its own, so the empty Routine list wore Anis Nep's "3"
+  while showing "Nothing here". Counts are now computed per list, and an empty
+  list shows no badge.
+- **Quick-add did nothing on Enter.** The row's `apply` signal never fires on
+  this system's libadwaita even though the key reaches the widget, so the
+  handler never ran, the text stayed, and nothing happened. Return and keypad
+  Enter are now handled by a key controller on the row itself, kept alongside
+  `apply` with a per-press yield so a working `apply` never double-submits.
+- **Quick-add created into the wrong list, silently and eventually.** It always
+  used the first list rather than the visible one, gave no feedback, and
+  triggered no sync, so a task sat invisible for up to five minutes even when
+  everything worked, and longer when it did not. It now targets the visible
+  list, confirms with a toast, syncs immediately, keeps the text on failure,
+  and reports the reason instead of only logging it.
+- **Synced changes never repainted.** A sync completion updated the tray and
+  cleared the status but never rebuilt the list, so flushed quick-adds, remote
+  edits, and checkbox toggles stayed invisible until something else rebuilt.
+  Completions now repaint when they changed or pushed anything, skipping only
+  while quick-add holds unsubmitted text so a background sync cannot eat what
+  is being typed.
+- **Checkbox toggles and due-date changes flipped back.** They queued the write
+  without applying it locally, so the next repaint re-rendered the old state.
+  Like deletes already did, they now apply to the cache at once, repaint, sync,
+  and toast on failure.
+- **The app logs to a file.** Picker launches have no terminal, which is why
+  every one of these failures was invisible. Records now also append to
+  `gtaskbar.log` in the data directory, with one rotated generation.
+
 - **Signing in crashed the app, so the browser's callback landed on a dead
   port.** Three defects stacked. First, the token exchange read the OAuth
   credentials out of the keyring from inside the Tokio runtime driving it, and
