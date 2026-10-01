@@ -53,8 +53,6 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 - `install.sh` with `--no-build` and `--uninstall`, installing into `~/.local`
   along with the desktop entry, the full icon set and an autostart entry.
 
-### Added
-
 - **Tray icon.** A StatusNotifierItem via `ksni`, which is pure Rust over D-Bus;
   the `tray-icon` crate's `libappindicator` feature needs a package that is not
   installed here. The icon is a themed symbolic name rather than a pixmap, so it
@@ -65,9 +63,42 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
   status-notifier host quits instead of becoming unreachable.
 - **Ctrl+W** closes the window through the same `close-request` path as the
   window button, so it also respects the hide-or-quit decision.
+- **`--hidden`**, which the autostart entry has always assumed and which the app
+  never implemented. A hidden start builds no window at all, so autostart gives
+  the tray icon and the background sync without a window appearing at every
+  login. A later launch from the app picker hands over to the same process
+  through single-instance semantics and opens the window as normal.
 
 ### Fixed
 
+- **Launching from the app picker did nothing, because there were two identical
+  "GTaskbar" entries and the broken one was as easy to click as the working one.**
+  The autostart entry was `NoDisplay=false`, so the session's copy of it was
+  listed in the launcher next to the real one. Its `Exec` passed `--hidden`,
+  which the app never declared, and GApplication parses `argv` before any app
+  code runs and exits 1 on an unknown flag, so the process died silently and the
+  launcher reported nothing. The autostart entry is now `NoDisplay=true` and the
+  flag is declared. A hidden start also needs an explicit `hold`, since
+  GApplication ends `run` as soon as there is no window and the process would
+  otherwise exit straight after starting.
+- **Both entries dropped `%U` from `Exec`.** The app declares no `MimeType` and
+  does not set `HANDLES_OPEN`, so GIO treats the substituted URL as a file to
+  open and aborts with "This application can not open files".
+- **OAuth failed outright with "Missing required parameter: redirect_uri".**
+  `redirect_uri` was never set on the authorize request, so Google rejected it
+  before showing the consent screen. It is now also held on the pending flow
+  rather than re-derived from the listener, so the value sent to the token
+  endpoint is byte-for-byte the one sent to the authorize endpoint.
+- **Notification action buttons would not have worked.** GIO routes notification
+  actions by `app.`-prefixed name and logs a warning for anything else; the
+  Complete button used an unprefixed name, which looks correct and silently does
+  nothing. The task id is now passed as the action's target value.
+- **Sidebar count badges and due chips filled their whole row.** A label in a
+  box fills it by default, and `AdwActionRow`'s suffix area fills its child
+  vertically regardless of the child's own `valign`, so neither the stylesheet
+  nor an explicit height request could shrink them. The sidebar row is now
+  composed explicitly instead of using `AdwActionRow`, which the suffix area was
+  the only reason for. Both are substantially smaller than before.
 - A task could be shown in the Completed view while still being open.
 - Sidebar membership was inferred from parent links rather than letting the
   store scope the query, which put every task in every list.

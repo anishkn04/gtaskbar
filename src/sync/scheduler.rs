@@ -81,8 +81,15 @@ pub fn open_store() {
     }
 }
 
-pub fn init(app: &adw::Application, window: &gtk::Window, config: &Config) {
-    WINDOW.with(|w| *w.borrow_mut() = Some(window.clone()));
+/// Starts the sync worker, the tray and the poll timers.
+///
+/// `window` is absent when the app was launched with `--hidden`: the tray and
+/// the timers have to run from the moment the session starts, otherwise
+/// autostart would give an app with nothing to sync and no way to show a window.
+pub fn init(app: &adw::Application, window: Option<&gtk::Window>, config: &Config) {
+    if let Some(window) = window {
+        WINDOW.with(|w| *w.borrow_mut() = Some(window.clone()));
+    }
     open_store();
 
     // Start the background runtime the sync worker runs on. It is created and

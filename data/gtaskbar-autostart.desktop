@@ -3,11 +3,14 @@ Type=Application
 Name=GTaskbar
 GenericName=Google Tasks Client
 Comment=A native, tray-first Google Tasks client for Linux
-Exec=gtaskbar --hidden %U
+Exec=gtaskbar --hidden
 Icon=gtaskbar
 Terminal=false
 Categories=GNOME;GTK;Utility;
-NoDisplay=false
+# Autostart entries live in the application menu unless this is true, which
+# put a second, duplicate "GTaskbar" entry in the launcher next to the real
+# one. This entry is only meant to be started by the session.
+NoDisplay=true
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=3
 X-GNOME-UsesNotifications=true

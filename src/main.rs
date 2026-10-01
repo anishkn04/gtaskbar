@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 mod api;
 mod auth;
 mod config;
@@ -24,8 +26,36 @@ fn main() -> glib::ExitCode {
         .resource_base_path("/dev/anishkn04/gtaskbar")
         .build();
 
+    // Autostart launches `gtaskbar --hidden`. GApplication parses argv itself
+    // and aborts with "Unknown option" and exit code 1 for a flag it does not
+    // know, so every flag a desktop entry passes has to be declared here.
+    register_main_options(&app);
+
     app.connect_startup(|_| load_css());
-    app.connect_activate(ui::window::activate);
+
+    let start_hidden = std::env::args().any(|arg| arg == "--hidden");
+    if start_hidden {
+        // Register the background machinery and the tray, then leave without a
+        // window. A later launch from the app picker hands over to this process
+        // and reaches the same `activate` handler below, which is what builds
+        // the window, so nothing is lost by not building one now.
+        app.connect_startup(ui::window::start_hidden);
+    }
+
+    // GApplication emits `activate` on the local instance immediately after
+    // startup, whether or not the user asked for anything, which would defeat
+    // --hidden by opening the window anyway. The first activation is therefore
+    // swallowed on a hidden start. Every later one comes from another process
+    // being handed over to this single instance, and those must open the
+    // window, so only the first is dropped.
+    let swallow_first_activate = Cell::new(start_hidden);
+    app.connect_activate(move |app| {
+        if swallow_first_activate.replace(false) {
+            log::info!("ignoring the startup activation; started with --hidden");
+            return;
+        }
+        ui::window::activate(app);
+    });
 
     app.run()
 }
@@ -42,6 +72,33 @@ fn load_css() {
             &display,
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+/// The command-line options the app accepts, as (name, help) pairs.
+///
+/// GLib's option parser runs before any app code and exits 1 on an unknown
+/// flag, so this list is what keeps a desktop entry working: a launcher shows no
+/// error at all when the exec fails this early, which is what made the
+/// autostart entry look broken.
+///
+/// The names have no leading dashes because GLib adds them. Passing "--hidden"
+/// registers "----hidden", which is then rejected under the very name the
+/// desktop entry uses.
+///
+/// There are no short forms, so `-h` keeps meaning `--help`.
+const MAIN_OPTIONS: &[(&str, &str)] = &[("hidden", "Start in the tray without opening a window")];
+
+fn register_main_options(app: &adw::Application) {
+    for (name, description) in MAIN_OPTIONS {
+        app.add_main_option(
+            name,
+            glib::Char::from(0),
+            glib::OptionFlags::NONE,
+            glib::OptionArg::None,
+            description,
+            None,
         );
     }
 }
@@ -141,4 +198,103 @@ fn about_dialog() -> adw::AboutDialog {
         .issue_url("https://github.com/anishkn04/gtaskbar/issues")
         .developers(vec!["Anish Kumar Neupane"])
         .build()
+}
+
+#[cfg(test)]
+mod desktop_entry_tests {
+    use super::MAIN_OPTIONS;
+
+    fn entry(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("could not read {}: {err}", path.display()))
+    }
+
+    fn key<'a>(contents: &'a str, wanted: &str) -> Option<&'a str> {
+        contents.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == wanted).then_some(value.trim())
+        })
+    }
+
+    fn exec_line(name: &str) -> String {
+        key(&entry(name), "Exec")
+            .unwrap_or_else(|| panic!("{name} has no Exec line"))
+            .to_string()
+    }
+
+    /// The autostart entry shipped a `--hidden` flag that the app did not
+    /// declare. GOption exits 1 before any app code runs, and a launcher that
+    /// fails this early reports nothing at all, so the app simply never started
+    /// and looked like a broken launcher rather than a bad flag.
+    #[test]
+    fn every_flag_a_desktop_entry_passes_is_declared() {
+        for name in ["gtaskbar.desktop", "gtaskbar-autostart.desktop"] {
+            for token in exec_line(name).split_whitespace() {
+                let Some(flag) = token.strip_prefix("--") else {
+                    continue;
+                };
+                assert!(
+                    MAIN_OPTIONS.iter().any(|(option, _)| *option == flag),
+                    "{name} passes --{flag}, which the app does not declare, so GOption \
+                     exits 1 and nothing starts",
+                );
+            }
+        }
+    }
+
+    /// The entries carried `%U`, but the app has no MimeType and does not set
+    /// HANDLES_OPEN, so GIO treats the substituted URL as a file to open and
+    /// aborts with "This application can not open files".
+    #[test]
+    fn no_desktop_entry_substitutes_a_file_or_url() {
+        for name in ["gtaskbar.desktop", "gtaskbar-autostart.desktop"] {
+            let exec = exec_line(name);
+            for field in ["%f", "%F", "%u", "%U", "%i", "%c", "%k"] {
+                assert!(
+                    !exec.contains(field),
+                    "{name} substitutes {field} in Exec, but the app takes no arguments",
+                );
+            }
+        }
+    }
+
+    /// An autostart entry is also a launchable application entry, so unless it
+    /// is hidden it turns up in the launcher next to the real one. That put two
+    /// identical "GTaskbar" entries in the app picker, and the broken autostart
+    /// one was as easy to click as the working one.
+    #[test]
+    fn the_autostart_entry_is_hidden_from_the_launcher() {
+        assert_eq!(
+            key(&entry("gtaskbar-autostart.desktop"), "NoDisplay"),
+            Some("true"),
+            "the autostart entry is listed in the app picker as a duplicate",
+        );
+    }
+
+    /// The launcher entry is the one users click, so it must stay visible.
+    #[test]
+    fn the_launcher_entry_is_visible() {
+        let contents = entry("gtaskbar.desktop");
+        assert_ne!(
+            key(&contents, "NoDisplay"),
+            Some("true"),
+            "the launcher entry is hidden, so the app cannot be started from the picker",
+        );
+        assert_eq!(key(&contents, "Type"), Some("Application"));
+    }
+
+    #[test]
+    fn both_entries_run_the_installed_binary() {
+        for name in ["gtaskbar.desktop", "gtaskbar-autostart.desktop"] {
+            let exec = exec_line(name);
+            assert_eq!(
+                exec.split_whitespace().next(),
+                Some("gtaskbar"),
+                "{name} should exec the bare binary name, which is what install.sh puts on PATH",
+            );
+        }
+    }
 }

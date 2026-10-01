@@ -2,9 +2,37 @@ use std::cell::RefCell;
 
 use adw::prelude::*;
 use gtk::gio;
+use gtk::gio::prelude::ApplicationExtManual;
 
 use super::icons;
 use crate::config::Config;
+
+/// Starts the app with no window, for `gtaskbar --hidden`.
+///
+/// The autostart entry passes this: it wants the tray icon and the background
+/// sync from login onwards, but a window appearing unprompted at every login is
+/// the reason people disable autostart entries. Everything except the window is
+/// the same as a normal start, so the app is fully functional and the tray's
+/// "Open GTaskbar" builds the window on demand.
+///
+/// `activate` is still connected in this mode, so a later launch from the app
+/// picker hands over to this process and opens the window.
+pub fn start_hidden(app: &adw::Application) {
+    let config = Config::load();
+    crate::sync::scheduler::open_store();
+    crate::notify::register_actions(app);
+    crate::notify::init(app);
+    crate::register_actions(app);
+    crate::sync::scheduler::init(app, None, &config);
+
+    // GApplication ends `run` as soon as the last window goes away, and here
+    // there has never been one, so without a hold the process would exit
+    // immediately after startup and autostart would do nothing at all. The hold
+    // is dropped again once a window exists, because that keeps the app alive by
+    // itself from then on.
+    HIDE_HOLD.with(|slot| *slot.borrow_mut() = Some(app.hold()));
+    log::info!("started hidden; the tray icon is the only way in");
+}
 
 /// The single main window. Created once and reused for the lifetime of the
 /// process, so the sidebar state and scroll position survive hide/show cycles
@@ -62,8 +90,13 @@ pub fn activate(app: &adw::Application) {
     crate::notify::init(app);
     window.present();
 
+    // The window now keeps the app running on its own, so the startup hold from
+    // a `--hidden` start is no longer needed. Dropping it here also means the
+    // app exits normally on quit rather than being pinned open by the hold.
+    HIDE_HOLD.with(|slot| slot.borrow_mut().take());
+
     crate::register_actions(app);
-    crate::sync::scheduler::init(app, &window.clone().upcast(), &config);
+    crate::sync::scheduler::init(app, Some(&window.clone().upcast()), &config);
 }
 
 /// Actions scoped to the window rather than the application.
@@ -118,6 +151,8 @@ pub fn rebuild(app: &adw::Application) {
 thread_local! {
     static ALLOW_CLOSE: RefCell<bool> = const { RefCell::new(false) };
     static TOASTS: RefCell<Option<adw::ToastOverlay>> = const { RefCell::new(None) };
+    /// Keeps a `--hidden` start alive while it has no window.
+    static HIDE_HOLD: RefCell<Option<gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
 }
 
 /// Shows a transient message at the bottom of the main window.
