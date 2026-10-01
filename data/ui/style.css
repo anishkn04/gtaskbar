@@ -61,3 +61,44 @@
 .gtaskbar-tray-list row {
   padding: 6px 10px;
 }
+
+/* Sidebar badges: task counts next to each smart view and list. */
+.gtaskbar-badge {
+  font-size: 0.8em;
+  font-weight: 700;
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background-color: alpha(currentColor, 0.12);
+}
+
+/* Due-date chip on a task row. The overdue and today variants are given real
+   semantic colour; later dates stay quiet so the urgent ones stand out. */
+.gtaskbar-due-chip {
+  font-size: 0.8em;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background-color: alpha(currentColor, 0.1);
+}
+
+.gtaskbar-due-chip.overdue {
+  color: @overdue_color;
+  background-color: alpha(@overdue_color, 0.15);
+  font-weight: 700;
+}
+
+.gtaskbar-due-chip.today {
+  color: @today_color;
+  background-color: alpha(@today_color, 0.15);
+  font-weight: 700;
+}
+
+/* The search field is wide enough to be useful but must not push the
+   toolbar buttons off a narrow window. */
+.gtaskbar-search {
+  min-width: 180px;
+}
+
+.gtaskbar-task-list {
+  margin: 12px;
+}

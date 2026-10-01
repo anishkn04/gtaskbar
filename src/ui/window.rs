@@ -50,6 +50,9 @@ pub fn activate(app: &adw::Application) {
         }
     });
 
+    crate::ui::sidebar::register_actions(&window);
+    crate::notify::register_actions(app);
+    crate::notify::init(app);
     window.present();
 
     crate::register_actions(app);
@@ -72,22 +75,13 @@ pub fn rebuild(app: &adw::Application) {
 
     // The window's content is always the ToastOverlay that `activate` created;
     // swapping its child preserves any toast that is already showing.
-    let child = window.child();
-    let is_overlay = matches!(
-        child
-            .as_ref()
-            .and_then(|c| c.downcast_ref::<adw::ToastOverlay>()),
-        Some(_)
-    );
-
-    if is_overlay {
-        if let Some(overlay) = child
-            .as_ref()
-            .and_then(|c| c.downcast_ref::<adw::ToastOverlay>())
-        {
-            overlay.set_child(Some(&root));
-            return;
-        }
+    let content = window.child();
+    if let Some(overlay) = content
+        .as_ref()
+        .and_then(|c| c.downcast_ref::<adw::ToastOverlay>())
+    {
+        overlay.set_child(Some(&root));
+        return;
     }
     window.set_content(Some(&root));
 }
@@ -140,6 +134,13 @@ pub fn present(app: &adw::Application) {
 /// was launched with `--hidden` and has no window yet.
 pub fn focus_quick_add(app: &adw::Application) {
     activate(app);
+    crate::ui::tasklist_view::focus_quick_add();
+}
+
+/// Focus the search field of the visible pane.
+pub fn focus_search(app: &adw::Application) {
+    activate(app);
+    crate::ui::tasklist_view::focus_search();
 }
 
 /// Stop intercepting `close-request`, so the window really closes. Called from
@@ -147,24 +148,117 @@ pub fn focus_quick_add(app: &adw::Application) {
 pub fn allow_close() {
     ALLOW_CLOSE.with(|flag| *flag.borrow_mut() = true);
 }
+/// What the UI needs from the cache, read once per rebuild.
+///
+/// Smart views span every list, so they read `all_tasks`; a list view reads
+/// only its own rows via `tasks_in_list`. The store already scopes by list, so
+/// the UI never has to infer membership by hand.
+struct Snapshot {
+    lists: Vec<(String, String)>,
+    smart_tasks: Vec<crate::store::models::Task>,
+}
 
-fn build_ui(config: &Config) -> adw::NavigationSplitView {
+fn snapshot() -> Snapshot {
+    let lists = crate::sync::scheduler::with_store(|store| match store.task_lists() {
+        Ok(lists) => lists,
+        Err(err) => {
+            log::warn!("could not read task lists from the cache: {err}");
+            Vec::new()
+        }
+    })
+    .unwrap_or_default();
+
+    let smart_tasks = crate::sync::scheduler::with_store(|store| match store.all_tasks() {
+        Ok(tasks) => tasks,
+        Err(err) => {
+            log::warn!("could not read tasks from the cache: {err}");
+            Vec::new()
+        }
+    })
+    .unwrap_or_default();
+
+    Snapshot {
+        lists: lists
+            .into_iter()
+            // `key` is the model's own identifier accessor, used here so the
+            // sidebar and the content stack agree on what identifies a list.
+            .map(|list| (list.key().to_string(), list.title))
+            .collect(),
+        smart_tasks,
+    }
+}
+
+fn tasks_for(view: &crate::model::view::View, snap: &Snapshot) -> Vec<crate::store::models::Task> {
+    match view {
+        crate::model::view::View::List(id) => {
+            crate::sync::scheduler::with_store(|store| match store.tasks_in_list(id) {
+                Ok(tasks) => tasks,
+                Err(err) => {
+                    log::warn!("could not read tasks for list {id}: {err}");
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default()
+        }
+        // Every other view spans the whole account.
+        _ => snap.smart_tasks.clone(),
+    }
+}
+
+fn build_ui(_config: &Config) -> adw::NavigationSplitView {
+    let snap = snapshot();
+
     let root = adw::NavigationSplitView::builder()
         .min_sidebar_width(200.0)
         .max_sidebar_width(360.0)
         .sidebar_width_fraction(0.28)
         .build();
 
-    // Both panes of a NavigationSplitView must be NavigationPages; each one
-    // wraps an AdwViewStack so we can swap the inner page without rebuilding
-    // the split view.
     let content_stack = adw::ViewStack::new();
-    let placeholder = adw::StatusPage::builder()
-        .title("GTaskbar")
-        .description("Google Tasks client")
-        .icon_name(icons::APP)
-        .build();
-    content_stack.add_titled(&placeholder, Some("placeholder"), "Overview");
+
+    // Smart views first, then each account's own lists.
+    let mut views: Vec<crate::model::view::View> = vec![
+        crate::model::view::View::Today,
+        crate::model::view::View::Upcoming,
+        crate::model::view::View::Overdue,
+        crate::model::view::View::All,
+        crate::model::view::View::Completed,
+    ];
+    views.extend(
+        snap.lists
+            .iter()
+            .map(|(id, _)| crate::model::view::View::List(id.clone())),
+    );
+
+    let mut panes = Vec::with_capacity(views.len());
+
+    for view in &views {
+        let title = match view {
+            crate::model::view::View::List(id) => snap
+                .lists
+                .iter()
+                .find(|(candidate, _)| candidate == id)
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| "Tasks".to_string()),
+            other => other.title(),
+        };
+
+        let pane = crate::ui::tasklist_view::TaskListView::new(view.clone(), &title);
+        pane.render(&tasks_for(view, &snap));
+        content_stack.add_titled(&pane.root, Some(&view.key()), &title);
+        panes.push(pane);
+    }
+
+    crate::ui::tasklist_view::register_panes(panes);
+
+    if views.is_empty() {
+        let placeholder = adw::StatusPage::builder()
+            .title("GTaskbar")
+            .description("Connect your Google account to get started.")
+            .icon_name(icons::APP)
+            .build();
+        content_stack.add_titled(&placeholder, Some("welcome"), "Welcome");
+    }
 
     let content_page = adw::NavigationPage::builder()
         .title("Tasks")
@@ -172,12 +266,30 @@ fn build_ui(config: &Config) -> adw::NavigationSplitView {
         .build();
     content_page.add_css_class("gtaskbar-content");
 
+    // The sidebar names each row after its view key, so switching panes is a
+    // lookup rather than a walk of the widget tree.
+    let sidebar_list = crate::ui::sidebar::build(&snap.smart_tasks, &snap.lists);
+
+    if !snap.lists.is_empty() {
+        sidebar_list.connect_row_selected(glib::clone!(
+            #[weak]
+            content_stack,
+            move |_, row| {
+                let Some(row) = row else { return };
+                let name = row.widget_name().to_string();
+                if !name.is_empty() {
+                    content_stack.set_visible_child_name(&name);
+                }
+            }
+        ));
+    }
+
     root.set_content(Some(&content_page));
-    root.set_sidebar(Some(&build_sidebar(config)));
+    root.set_sidebar(Some(&build_sidebar_page(&sidebar_list, &snap)));
     root
 }
 
-fn build_sidebar(config: &Config) -> adw::NavigationPage {
+fn build_sidebar_page(sidebar_list: &gtk::ListBox, snap: &Snapshot) -> adw::NavigationPage {
     let header = adw::HeaderBar::new();
 
     // A primary menu button in the header, matching GNOME convention.
@@ -192,102 +304,47 @@ fn build_sidebar(config: &Config) -> adw::NavigationPage {
     menu_button.set_property("primary", true);
     header.pack_end(&menu_button);
 
-    let stack = adw::ViewStack::new();
+    let layout = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    layout.append(&header);
 
-    // Lists come from the local cache, so the sidebar renders instantly and
-    // works with no network. A cache miss (first run, or not connected yet)
-    // falls back to an explanatory empty state.
-    let lists = crate::sync::scheduler::with_store(|store| match store.task_lists() {
-        Ok(lists) => lists,
-        Err(err) => {
-            log::warn!("could not read task lists from the cache: {err}");
-            Vec::new()
-        }
-    })
-    .unwrap_or_default();
-
-    if lists.is_empty() {
+    if snap.lists.is_empty() {
+        let connected = crate::auth::session::is_connected();
         let status = adw::StatusPage::builder()
-            .icon_name(if crate::auth::session::is_connected() {
+            .icon_name(if connected {
                 icons::LIST
             } else {
                 icons::ACCOUNT
             })
-            .title(if crate::auth::session::is_connected() {
+            .title(if connected {
                 "No task lists"
             } else {
                 "Not connected"
             })
-            .description(if crate::auth::session::is_connected() {
-                format!(
-                    "Your account is connected, but no task lists have arrived yet.\nSort: {} · Group: {}",
-                    config.sort_mode.label(),
-                    config.group_mode.label()
-                )
+            .description(if connected {
+                "Your account is connected, but no task lists have arrived yet."
             } else {
-                "Connect your Google account to load your task lists.".to_string()
+                "Connect your Google account to load your task lists."
             })
             .build();
 
-        // Only offer the connect action when there is something to connect.
-        if !crate::auth::session::is_connected() {
+        if !connected {
             let connect = gtk::Button::with_label("Connect Google account");
             connect.add_css_class("pill");
             connect.add_css_class("suggested-action");
             connect.set_halign(gtk::Align::Center);
-            connect.connect_clicked(|_| {
-                crate::ui::connect::present();
-            });
+            connect.connect_clicked(|_| crate::ui::connect::present());
             status.set_child(Some(&connect));
         }
 
-        stack.add_titled(&status, Some("status"), "Overview");
+        layout.append(&status);
     } else {
-        let list = gtk::ListBox::builder()
-            .selection_mode(gtk::SelectionMode::Single)
-            .css_classes(["navigation-sidebar"])
-            .build();
-        list.add_css_class("gtaskbar-sidebar");
-
-        for task_list in &lists {
-            let incomplete = crate::sync::scheduler::with_store(|store| {
-                store
-                    .tasks_in_list(task_list.key())
-                    .map(|tasks| tasks.iter().filter(|task| !task.is_completed()).count())
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
-
-            let row = adw::ActionRow::builder()
-                .title(&task_list.title)
-                .activatable(true)
-                .build();
-            row.add_prefix(&icons::image(icons::LIST));
-            if incomplete > 0 {
-                let count = gtk::Button::builder()
-                    .label(incomplete.to_string())
-                    .css_classes(["flat", "circular", "suggested-action"])
-                    .valign(gtk::Align::Center)
-                    .build();
-                count.set_sensitive(false);
-                row.add_suffix(&count);
-            }
-            list.append(&row);
-        }
-
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&list)
+            .child(sidebar_list)
             .build();
-        stack.add_titled(&scroller, Some("lists"), "Task lists");
+        layout.append(&scroller);
     }
-
-    // A NavigationPage's header is part of its child, so stack the header above
-    // the view stack inside a simple vertical box.
-    let layout = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    layout.append(&header);
-    layout.append(&stack);
 
     adw::NavigationPage::builder()
         .title("Tasks")

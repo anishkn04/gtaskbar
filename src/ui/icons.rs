@@ -20,6 +20,10 @@
 /// `dev.anishkn04.gtaskbar` would miss and fall back to a stock placeholder.
 pub const APP: &str = "gtaskbar";
 
+/// The symbolic variant, for places that need a `GioIcon` rather than a widget
+/// (notifications, in particular).
+pub const APP_SYMBOLIC: &str = "gtaskbar-symbolic";
+
 /// Main window and task list.
 pub const LIST: &str = "gtaskbar-list-symbolic";
 /// App menu button.
@@ -34,8 +38,6 @@ pub const CHECK: &str = "gtaskbar-check-symbolic";
 pub const ADD: &str = "gtaskbar-add-symbolic";
 /// Manual and scheduled sync.
 pub const SYNC: &str = "gtaskbar-sync-symbolic";
-/// Search.
-pub const SEARCH: &str = "gtaskbar-search-symbolic";
 /// Account / connect.
 pub const ACCOUNT: &str = "gtaskbar-account-symbolic";
 
@@ -63,8 +65,8 @@ mod tests {
     #[test]
     fn icon_names_are_unique() {
         let all = [
-            LIST, MENU, CLOSE, SETTINGS, CHECK, ADD, SYNC, SEARCH, ACCOUNT, TODAY, UPCOMING,
-            OVERDUE, ALL, COMPLETED,
+            LIST, MENU, CLOSE, SETTINGS, CHECK, ADD, SYNC, ACCOUNT, TODAY, UPCOMING, OVERDUE, ALL,
+            COMPLETED,
         ];
         let unique: HashSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len(), "icon names must be unique");
@@ -75,8 +77,8 @@ mod tests {
         // A bare name could collide with a system icon of the same name, which
         // would silently swap our artwork for the theme's.
         let all = [
-            LIST, MENU, CLOSE, SETTINGS, CHECK, ADD, SYNC, SEARCH, ACCOUNT, TODAY, UPCOMING,
-            OVERDUE, ALL, COMPLETED,
+            LIST, MENU, CLOSE, SETTINGS, CHECK, ADD, SYNC, ACCOUNT, TODAY, UPCOMING, OVERDUE, ALL,
+            COMPLETED,
         ];
         for name in all {
             assert!(name.starts_with("gtaskbar-"), "{name} is not namespaced");

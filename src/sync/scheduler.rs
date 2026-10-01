@@ -146,7 +146,13 @@ pub fn request_sync(app: &adw::Application) {
 /// delivering the result back with `spawn_local`, so no widget is ever touched
 /// off the main thread.
 fn spawn_sync(app: adw::Application) {
-    // Nothing to do until an account is connected.
+    // Nothing to do until an account is connected. After a restart the access
+    // token is gone from memory but a refresh token is in the keyring, so
+    // restore it before deciding the account is not connected.
+    if crate::auth::session::access_token().is_none() && crate::auth::flow::has_stored_token() {
+        restore_session();
+    }
+
     let Some(token) = crate::auth::session::access_token() else {
         log::debug!("skipping sync: no account is connected");
         return;
@@ -214,6 +220,58 @@ fn spawn_sync(app: adw::Application) {
         let cache_path = Store::cache_path();
         let outcome = engine::sync_all(&cache_path, &mut { client }).await;
         let _ = tx.send(outcome);
+    });
+}
+
+/// Exchanges the stored refresh token for a fresh access token.
+///
+/// Runs on its own runtime because it is a one-shot at startup and must not
+/// block the sync worker, which is about to be scheduled separately.
+fn restore_session() {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
+    if let Err(err) = std::thread::Builder::new()
+        .name("gtaskbar-refresh".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    let _ = tx.send(Err(format!("could not start a runtime: {err}")));
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(async {
+                let authorized = crate::auth::flow::refresh().await?;
+                // Persisting also stores any rotated refresh token, which must
+                // happen before the access token is used for anything.
+                authorized.persist()?;
+                Ok::<(), anyhow::Error>(())
+            });
+
+            let _ = tx.send(outcome.map_err(|err| err.to_string()));
+        })
+    {
+        log::error!("could not start the token refresh thread: {err}");
+        return;
+    }
+
+    glib::MainContext::default().spawn_local(async move {
+        glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+            Ok(Ok(())) => {
+                log::info!("restored the session from the stored refresh token");
+                glib::ControlFlow::Break
+            }
+            Ok(Err(message)) => {
+                log::warn!("could not restore the session: {message}");
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+        });
     });
 }
 

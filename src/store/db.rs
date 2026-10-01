@@ -179,18 +179,6 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn delete_task_list(&self, list_id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM task_lists WHERE id = ?1", params![list_id])?;
-        self.conn
-            .execute("DELETE FROM tasks WHERE list_id = ?1", params![list_id])?;
-        self.conn.execute(
-            "DELETE FROM sync_state WHERE list_id = ?1",
-            params![list_id],
-        )?;
-        Ok(())
-    }
-
     // ---- tasks ------------------------------------------------------------
 
     /// Upserts tasks into a list, replacing any existing row for the same
@@ -259,6 +247,20 @@ impl Store {
             "{TASK_COLUMNS} WHERE list_id = ?1 AND deleted = 0"
         ))?;
         let rows = stmt.query_map(params![list_id], row_to_task)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Every non-deleted task with the list it belongs to.
+    ///
+    /// `Task` deliberately carries no list id, because the API's task objects
+    /// have no such field. Callers that need to write back — the notification
+    /// dedupe, for one — have to know which list each task lives in, so this
+    /// pairs them rather than making each caller re-derive it.
+    pub fn all_tasks_with_lists(&self) -> Result<Vec<(String, Task)>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{TASK_COLUMNS} WHERE deleted = 0"))?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row_to_task(row)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -502,14 +504,6 @@ impl Store {
             "INSERT INTO sync_state (list_id, last_full_sync) VALUES (?1, ?2)
              ON CONFLICT(list_id) DO UPDATE SET last_full_sync = excluded.last_full_sync",
             params![list_id, timestamp],
-        )?;
-        Ok(())
-    }
-
-    pub fn clear_sync_state(&self, list_id: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM sync_state WHERE list_id = ?1",
-            params![list_id],
         )?;
         Ok(())
     }
@@ -807,6 +801,40 @@ mod tests {
             store.last_delta("@a").unwrap().as_deref(),
             Some("2026-10-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn all_tasks_with_lists_pairs_each_task_with_its_list() {
+        let store = store();
+        store
+            .upsert_task_lists(&[
+                TaskList {
+                    id: "@a".into(),
+                    title: "A".into(),
+                    updated: None,
+                    etag: None,
+                },
+                TaskList {
+                    id: "@b".into(),
+                    title: "B".into(),
+                    updated: None,
+                    etag: None,
+                },
+            ])
+            .unwrap();
+        store
+            .upsert_tasks("@a", &[sample_task("t1", "One")])
+            .unwrap();
+        store
+            .upsert_tasks("@b", &[sample_task("t2", "Two")])
+            .unwrap();
+
+        let paired = store.all_tasks_with_lists().unwrap();
+        assert_eq!(paired.len(), 2);
+        assert_eq!(paired[0].0, "@a");
+        assert_eq!(paired[0].1.id, "t1");
+        assert_eq!(paired[1].0, "@b");
+        assert_eq!(paired[1].1.id, "t2");
     }
 
     #[test]

@@ -109,17 +109,34 @@ pub fn present_for(parent: &gtk::Window) {
     connect.set_halign(gtk::Align::Center);
     connect.set_margin_top(12);
     connect.set_margin_bottom(12);
+    let client_secret_for_click = client_secret.clone();
     connect.connect_clicked(glib::clone!(
         #[weak]
         client_id,
+        #[weak]
+        client_secret_for_click,
         move |button| {
-            let id = client_id.text().to_string();
-            if id.trim().is_empty() {
+            let id = client_id.text().trim().to_string();
+            let secret = client_secret_for_click.text().trim().to_string();
+
+            if id.is_empty() || secret.is_empty() {
+                button.set_label("Enter a client ID and secret first");
                 return;
             }
+
+            let credentials = crate::auth::credentials::ClientCredentials {
+                client_id: id,
+                client_secret: secret,
+            };
+            if let Err(err) = credentials.store() {
+                log::error!("could not save the credentials: {err}");
+                button.set_label("Could not reach the keyring");
+                return;
+            }
+
             button.set_sensitive(false);
-            button.set_label("Authorisation flow is the next milestone");
-            log::info!("client id captured ({} characters)", id.len());
+            button.set_label("Waiting for the browser…");
+            start_authorisation(button.clone());
         }
     ));
 
@@ -170,6 +187,125 @@ fn step_row(number: &str, title: &str, detail: &str) -> adw::ActionRow {
     badge.set_size_request(28, 28);
     row.add_prefix(&badge);
     row
+}
+
+/// Opens the browser and completes the authorisation.
+///
+/// Runs on a worker thread because the loopback listener blocks until the
+/// browser returns, and the GTK main loop must stay responsive. The button is
+/// updated from the main context when the flow finishes.
+fn start_authorisation(button: gtk::Button) {
+    let pending = match crate::auth::flow::begin() {
+        Ok(pending) => pending,
+        Err(err) => {
+            log::error!("could not start the authorisation flow: {err}");
+            button.set_sensitive(true);
+            button.set_label("Authorise");
+            return;
+        }
+    };
+
+    let url = pending.authorize_url.clone();
+    if let Err(err) = open_in_browser(&url) {
+        log::error!("could not open a browser: {err}");
+        button.set_sensitive(true);
+        button.set_label("Authorise");
+        return;
+    }
+
+    // Neither a widget nor even a weak reference to one is `Send`, so nothing
+    // GTK-owned crosses the thread boundary. The worker sends a plain result
+    // over a channel, and the main thread polls for it.
+    let (tx, rx) = std::sync::mpsc::channel::<Result<crate::auth::flow::Authorized, String>>();
+
+    if let Err(err) = std::thread::Builder::new()
+        .name("gtaskbar-oauth".into())
+        .spawn(move || {
+            let outcome =
+                block_on(crate::auth::flow::finish(pending)).map_err(|err| err.to_string());
+            let _ = tx.send(outcome);
+        })
+    {
+        log::error!("could not start the authorisation thread: {err}");
+        button.set_sensitive(true);
+        button.set_label("Authorise");
+        return;
+    }
+
+    glib::MainContext::default().spawn_local(async move {
+        glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+            let outcome = match rx.try_recv() {
+                Ok(outcome) => outcome,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    button.set_sensitive(true);
+                    button.set_label("Try again");
+                    return glib::ControlFlow::Break;
+                }
+            };
+
+            match outcome {
+                Ok(authorized) => {
+                    if let Err(err) = authorized.persist() {
+                        log::error!("authorised, but could not store the token: {err}");
+                        button.set_sensitive(true);
+                        button.set_label("Authorise");
+                        return glib::ControlFlow::Break;
+                    }
+                    log::info!("authorised; reloading the window");
+                    // A fresh authorisation should not immediately notify about
+                    // everything the account has ever been reminded of.
+                    crate::sync::queue::reset_notification_history();
+                    let app = adw::Application::default();
+                    crate::ui::window::rebuild(&app);
+                    crate::sync::scheduler::request_sync(&app);
+                }
+                Err(message) => {
+                    log::error!("authorisation failed: {message}");
+                    button.set_sensitive(true);
+                    button.set_label("Try again");
+                }
+            }
+
+            glib::ControlFlow::Break
+        });
+    });
+}
+
+/// Opens a URL in the user's browser.
+///
+/// `xdg-open` is used rather than `GtkUriLauncher`, which is gated behind newer
+/// GLib than some distributions ship, and which would additionally route
+/// through the desktop portal for no benefit here.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+/// Drives an async future to completion on a fresh runtime.
+///
+/// The authorisation flow is a one-shot, so a dedicated runtime is simpler than
+/// sharing the sync engine's.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(future),
+        Err(err) => {
+            log::error!("could not start a runtime for the token exchange: {err}");
+            // The caller's only job with this value is to format it, so rather
+            // than inventing a fake value, block forever: the button stays
+            // disabled, which is the honest representation of "not finished".
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+    }
 }
 
 /// Reads client credentials from the environment, for development.
