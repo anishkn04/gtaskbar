@@ -21,6 +21,10 @@
 //! The only artwork gtaskbar ships is the application icon, which has to exist
 //! independently of any theme. See `docs/icons.md`.
 
+use gtk::gdk;
+use gtk::glib::object::{Cast, IsA};
+use gtk::prelude::WidgetExt;
+
 /// The application icon.
 ///
 /// The one piece of artwork gtaskbar must ship, because an application icon has
@@ -60,6 +64,37 @@ pub const COMPLETED: &str = "checkbox-symbolic";
 /// destructive states, and follows the active theme in light and dark.
 pub fn image(name: &str) -> gtk::Image {
     gtk::Image::from_icon_name(name)
+}
+
+/// Hides the indicator icons inside an entry row that the icon theme cannot
+/// resolve.
+///
+/// libadwaita's entry rows carry indicator images under `adw-*-symbolic`
+/// names, and this system's `adwaita-icon-theme` ships none of them (see
+/// docs/icons.md). Unresolvable, they paint as a stray glyph at the row's
+/// edge. Only images with no resolvable icon are hidden; anything the theme
+/// provides keeps working, so this degrades gracefully if a theme update
+/// closes the gap.
+pub fn hide_unresolvable_indicators(widget: &impl IsA<gtk::Widget>) {
+    let theme = gdk::Display::default().map(|display| gtk::IconTheme::for_display(&display));
+    hide_missing(widget.upcast_ref(), theme.as_ref());
+}
+
+fn hide_missing(widget: &gtk::Widget, theme: Option<&gtk::IconTheme>) {
+    if let Some(image) = widget.downcast_ref::<gtk::Image>() {
+        let resolvable = image
+            .icon_name()
+            .as_deref()
+            .is_some_and(|name| theme.is_some_and(|theme| theme.has_icon(name)));
+        if !resolvable {
+            image.set_visible(false);
+        }
+    }
+    let mut child = widget.first_child();
+    while let Some(next) = child {
+        hide_missing(&next, theme);
+        child = next.next_sibling();
+    }
 }
 
 #[cfg(test)]

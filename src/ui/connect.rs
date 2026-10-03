@@ -129,6 +129,11 @@ fn build_dialog(dialog: &adw::Window) {
         .title("Client secret")
         .text(env_secret)
         .build();
+    // Same treatment as the quick-add row: the rows' indicator images use
+    // icon names this system's theme does not ship, and paint as stray
+    // glyphs. Only unresolvable icons are hidden.
+    icons::hide_unresolvable_indicators(&client_id);
+    icons::hide_unresolvable_indicators(&client_secret);
     credentials.add(&client_id);
     credentials.add(&client_secret);
     page.add(&credentials);
@@ -282,6 +287,10 @@ fn start_authorisation(button: gtk::Button) {
                         return glib::ControlFlow::Break;
                     }
                     log::info!("authorised; reloading the window");
+                    // Fresh credentials supersede any earlier rejection.
+                    crate::sync::scheduler::record_outcome(&Ok(
+                        crate::sync::engine::SyncReport::default(),
+                    ));
                     // A fresh authorisation should not immediately notify about
                     // everything the account has ever been reminded of.
                     crate::sync::queue::reset_notification_history();

@@ -76,6 +76,164 @@ fn resolve_list_in(
     lists.into_iter().next().map(|list| (list.id, list.title))
 }
 
+/// Applies an arbitrary patch to a task.
+///
+/// The task editor's save path: title, notes, due date and completion flow
+/// through one operation rather than one function per field. Applies locally
+/// at once and reports failures instead of only logging them, like the other
+/// writes.
+pub fn patch_task(task_id: &str, patch: TaskPatch) -> Result<(), String> {
+    let Some(list_id) = list_of(task_id) else {
+        return Err(format!(
+            "cannot change {task_id:?}: it is not in any cached list"
+        ));
+    };
+
+    let payload = serde_json::to_string(&patch)
+        .map_err(|err| format!("could not serialise the change: {err}"))?;
+
+    enqueue(PendingOp {
+        id: 0,
+        list_id: list_id.clone(),
+        task_id: Some(task_id.to_string()),
+        kind: PendingOpKind::Patch,
+        payload,
+        attempts: 0,
+        last_error: None,
+    })
+    .map_err(|err| format!("could not queue the change: {err}"))?;
+
+    with_open_store(|store| {
+        let mut task = store
+            .task(&list_id, task_id)
+            .map_err(|err| format!("could not read the cached task: {err}"))?
+            .ok_or_else(|| format!("cannot change {task_id:?}: it vanished from the cache"))?;
+        if let Some(title) = &patch.title {
+            task.title = title.clone();
+        }
+        if let Some(notes) = &patch.notes {
+            task.notes = notes.clone();
+        }
+        if let Some(status) = patch.status {
+            task.status = status;
+            task.completed = match status {
+                TaskStatus::Completed => Some(chrono::Utc::now()),
+                TaskStatus::NeedsAction => None,
+            };
+        }
+        if let Some(due) = patch.due {
+            task.due = due;
+        }
+        store
+            .upsert_tasks(&list_id, &[task])
+            .map_err(|err| format!("could not update the cached task: {err}"))
+    })
+}
+
+/// Reorders a task among its siblings, optionally reparenting it.
+///
+/// `parent` follows the move endpoint's spelling: `None` leaves the parent
+/// alone, `Some(None)` promotes to the top level, `Some(Some(id))` reparents.
+/// Same for `previous`: `Some(None)` moves first. Only sibling reordering is
+/// offered by the UI; cross-list moves go through delete plus insert so the
+/// two writes keep their order in the queue.
+pub fn move_task(
+    task_id: &str,
+    parent: Option<Option<String>>,
+    previous: Option<Option<String>>,
+) -> Result<(), String> {
+    let Some(list_id) = list_of(task_id) else {
+        return Err(format!(
+            "cannot move {task_id:?}: it is not in any cached list"
+        ));
+    };
+
+    let request = crate::api::convert::MoveRequest {
+        destination_tasklist: None,
+        parent,
+        previous,
+    };
+    let payload = serde_json::to_string(&request)
+        .map_err(|err| format!("could not serialise the move: {err}"))?;
+
+    enqueue(PendingOp {
+        id: 0,
+        list_id,
+        task_id: Some(task_id.to_string()),
+        kind: PendingOpKind::Move,
+        payload,
+        attempts: 0,
+        last_error: None,
+    })
+    .map_err(|err| format!("could not queue the move: {err}"))?;
+
+    // Positions are the server's opaque ordering key and cannot be computed
+    // locally, so unlike the other writes there is no local apply: the row
+    // visibly moves when the flush comes back and the view repaints.
+    Ok(())
+}
+
+/// Moves a task to another list.
+///
+/// There is no cross-list move endpoint with safe ordering, so this is an
+/// insert into the destination followed by a delete from the source, queued
+/// in that order: the flush replays in insertion order and stops at the first
+/// failure, so a failed insert never orphans the task by deleting first.
+///
+/// Unlike the other writes there is no local apply: the server assigns the
+/// copy a new id, and a local copy under the old id would duplicate until a
+/// full sync reconciles it. The completion repaint shows the result instead.
+pub fn move_to_list(task_id: &str, dest_list_id: &str) -> Result<(), String> {
+    let Some(src_list_id) = list_of(task_id) else {
+        return Err(format!(
+            "cannot move {task_id:?}: it is not in any cached list"
+        ));
+    };
+    if src_list_id == dest_list_id {
+        return Ok(());
+    }
+
+    let task = with_open_store(|store| {
+        store
+            .task(&src_list_id, task_id)
+            .map_err(|err| format!("could not read the cached task: {err}"))?
+            .ok_or_else(|| format!("cannot move {task_id:?}: it vanished from the cache"))
+    })?;
+
+    let patch = TaskPatch {
+        title: Some(task.title),
+        notes: Some(task.notes),
+        status: Some(task.status),
+        due: Some(task.due),
+    };
+    let payload = serde_json::to_string(&patch)
+        .map_err(|err| format!("could not serialise the move: {err}"))?;
+
+    enqueue(PendingOp {
+        id: 0,
+        list_id: dest_list_id.to_string(),
+        task_id: None,
+        kind: PendingOpKind::Insert,
+        payload,
+        attempts: 0,
+        last_error: None,
+    })
+    .map_err(|err| format!("could not queue the move: {err}"))?;
+
+    enqueue(PendingOp {
+        id: 0,
+        list_id: src_list_id,
+        task_id: Some(task_id.to_string()),
+        kind: PendingOpKind::Delete,
+        payload: "{}".to_string(),
+        attempts: 0,
+        last_error: None,
+    })
+    .map_err(|err| format!("could not queue the move: {err}"))?;
+
+    Ok(())
+}
+
 /// Marks a task done or not done.
 ///
 /// The task id alone is not enough to queue a write, because the write also
