@@ -10,22 +10,31 @@ home on the Linux desktop.
 
 ## Status
 
-Early development. The application shell, preferences and packaging are in
-place; the Google account connection, sync engine and task list UI are being
-built. See [Roadmap](#roadmap).
+Working: account connection over OAuth with PKCE, two-way sync with a local
+SQLite cache and queued offline writes, task lists with smart views, sorting
+and grouping, quick-add, a task editor, notifications with actions, a tray
+icon with due-count attention, and autostart. See [Roadmap](#roadmap) for what
+remains.
+
+## Screenshots
+
+![The task list, with sidebar, badges and quick-add](docs/screenshots/main-window.png)
+![An empty list](docs/screenshots/task-list.png)
+![Preferences](docs/screenshots/preferences.png)
+![Connecting a Google account](docs/screenshots/connect-dialog.png)
 
 ## Features
 
-Planned:
-
 - Full two-way sync with Google Tasks via the official REST API
-- Tray icon with a due-count badge, so the app works without opening a window
-- Notifications for tasks that become due, with **Complete** and **Snooze**
-  actions
+- Tray icon with due-count attention, so the app works without opening a window
+- Notifications for tasks that become due, with **Complete**, **Snooze** and
+  **Open** actions
 - Six sort modes: manual, due date, alphabetical, created, updated, priority
 - Grouping by list, due bucket or status
-- Quick-add from the main window or the tray
-- Subtasks, matching Google Tasks' own hierarchy
+- Quick-add from the main window or the tray (`Ctrl+N`)
+- Subtasks with expanders, matching Google Tasks' own hierarchy
+- A task editor: title, notes, due date, list, parent, delete with confirmation
+- Keyboard shortcuts (`Ctrl+N`, `Ctrl+F`, `Ctrl+R`, `Delete`, `Escape`, `F1`)
 - Offline-capable: the UI reads from a local SQLite cache and queues writes
 
 ## Requirements
@@ -110,6 +119,7 @@ These are constraints of the API, not bugs in GTaskbar:
 | Time of day for a due date | **Not supported.** The API stores only the date and discards the time portion of `due`. |
 | Recurring tasks | **Not exposed.** Google Tasks has no recurrence field on the API surface. |
 | Priorities, tags, locations, reminders | **Not exposed.** |
+| Per-task reminder times | **Not supported.** The API discards the time portion of `due`, so there is one global notify hour for tasks due today, not a time per task. |
 | Task ordering | Opaque lexicographic `position` string; reordering uses the `tasks.move` endpoint. |
 | Attachments, comments | **Not exposed.** |
 

@@ -1,0 +1,53 @@
+# Maintainer: Anish Kumar Neupane
+pkgname=gtaskbar
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Native, tray-first Google Tasks client for Linux (GTK4/libadwaita)"
+arch=('x86_64')
+url="https://github.com/anishkn04/gtaskbar"
+license=('MIT')
+depends=(
+  'gtk4'
+  'libadwaita'
+  'sqlite'
+  'openssl'
+  'hicolor-icon-theme'
+  'gcc-libs'
+  'glibc'
+)
+makedepends=('cargo')
+# Update the sum below with `updpkgsums` on every release.
+source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --release --locked --offline
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+
+  # The desktop entries carry an @bindir@ placeholder because install.sh
+  # substitutes the install prefix; a system package resolves it to /usr/bin.
+  sed "s|@bindir@|/usr/bin|g" "data/$pkgname.desktop" > "$pkgname.desktop"
+  sed "s|@bindir@|/usr/bin|g" "data/$pkgname-autostart.desktop" > "$pkgname-autostart.desktop"
+  install -Dm644 "$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+  # No autostart entry: starting at login is the user's choice, not the
+  # package's. Copy the substituted autostart file there by hand to opt in.
+
+  install -Dm644 "data/icons/scalable/apps/$pkgname.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
+  for icon in data/icons/symbolic/apps/$pkgname*.svg; do
+    [ -e "$icon" ] || continue
+    install -Dm644 "$icon" "$pkgdir/usr/share/icons/hicolor/symbolic/apps/$(basename "$icon")"
+  done
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

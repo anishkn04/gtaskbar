@@ -1,0 +1,53 @@
+# Flatpak manifest for GTaskbar.
+#
+# Built from the release tarball rather than from source: Flatpak builders
+# run offline, and vendoring the full Cargo dependency tree into the manifest
+# would pin hundreds of crates by hand. The tarball carries an installed-able
+# tree (binary + install.sh + data/), so the build below is just files.
+#
+# Validate locally with:
+#   flatpak-builder --force-clean --user --install build-dir dev.anishkn04.gtaskbar.yml
+# Run with:
+#   flatpak run --user dev.anishkn04.gtaskbar
+#
+# Two sandbox notes, both documented rather than hidden:
+# - `--socket=session-bus` is required: the tray icon is a StatusNotifierItem
+#   over D-Bus, and GNOME Keyring secret-service access goes over the bus too.
+#   A tighter `--talk-name=org.kde.StatusNotifierWatcher` plus the Secret
+#   Service name would be preferable; see the finish-args below.
+# - `--filesystem=xdg-data/gtaskbar` persists the SQLite cache outside the
+#   sandbox so reinstalls keep their data.
+app-id: dev.anishkn04.gtaskbar
+runtime: org.gnome.Platform
+runtime-version: "48"
+sdk: org.gnome.Sdk
+command: gtaskbar
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --socket=session-bus
+  - --device=dri
+  - --filesystem=xdg-data/gtaskbar:create
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --own-name=dev.anishkn04.gtaskbar
+modules:
+  - name: gtaskbar
+    buildsystem: simple
+    sources:
+      # Fill in per release, e.g.:
+      # - type: archive
+      #   url: https://github.com/anishkn04/gtaskbar/releases/download/v0.1.0/gtaskbar-0.1.0.tar.gz
+      #   sha256: <release sha256>
+      - type: dir
+        path: .
+    build-commands:
+      - install -Dm755 gtaskbar /app/bin/gtaskbar
+      - sed "s|@bindir@|/app/bin|g" data/gtaskbar.desktop > gtaskbar.desktop
+      - install -Dm644 gtaskbar.desktop /app/share/applications/dev.anishkn04.gtaskbar.desktop
+      - install -Dm644 data/icons/scalable/apps/gtaskbar.svg /app/share/icons/hicolor/scalable/apps/gtaskbar.svg
+      - install -Dm644 data/icons/symbolic/apps/gtaskbar-symbolic.svg /app/share/icons/hicolor/symbolic/apps/gtaskbar-symbolic.svg

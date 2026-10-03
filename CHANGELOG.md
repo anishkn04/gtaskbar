@@ -68,6 +68,36 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
   the tray icon and the background sync without a window appearing at every
   login. A later launch from the app picker hands over to the same process
   through single-instance semantics and opens the window as normal.
+- **Virtualised task list.** The content pane renders on `GtkListView`, so a
+  list of any size costs one widget per visible row instead of one per task.
+  Sorting, grouping, search, collapse state, selection and scroll position all
+  survived the move; section headers are model items rather than stray
+  widgets.
+- **Subtask expanders.** Parents show a collapse control; collapsing hides
+  descendants through the model and remembers per pane.
+- **Grouping by list and by status.** The settings offered them but both
+  rendered flat; sections now materialise like the due buckets do.
+- **Drag to reorder in Manual mode.** Drops onto a row insert before it, drops
+  on empty area append at the end; same-list, same-parent and Manual-only
+  validated, no-ops accepted without a round-trip, positions left to the
+  server since they are its opaque key.
+- **Task editor.** Title, notes, due date (Today/Tomorrow/Clear), list and
+  parent pickers, delete with confirmation. Only changed fields travel;
+  reparenting goes through `tasks.move`, list changes through ordered
+  insert-then-delete so a failed insert never orphans the task.
+- **Keyboard shortcuts and a help overlay.** `Ctrl+N` quick-add, `Ctrl+F`
+  search, `Ctrl+R` sync, `Delete` the selected task (never while editing
+  text), `Escape` cancels typing, `F1` opens the overlay, also in the menu.
+- **Notification Snooze and Open.** Snooze pushes the due date a day through
+  the normal queued write; Open presents the window on the task's list.
+  Servers without action support get in-window toasts instead of dead buttons,
+  detected once via capabilities.
+- **State banners.** Offline, failed-sync with Retry, session-expired and
+  not-connected with Connect, by priority, in every pane.
+- **Priority table in Preferences.** The derived scoring is now documented
+  where the sort mode is chosen, not just in the repo docs.
+- **README screenshots** of the task list, an empty list, Preferences and the
+  connect dialog.
 
 ### Fixed
 
