@@ -193,6 +193,37 @@ pub fn register_actions(app: &adw::Application) {
         .activate(|app: &adw::Application, _, _| ui::settings::present(app))
         .build();
 
+    // Deletes the selected task of the visible pane. Stands down while text
+    // is being edited, so Delete keeps deleting characters where it should.
+    let delete_selected = gio::ActionEntry::builder("delete-selected")
+        .activate(|app: &adw::Application, _, _| {
+            let Some(pane) = ui::tasklist_view::visible_pane() else {
+                return;
+            };
+            if pane.editing_text() {
+                return;
+            }
+            let Some(task_id) = pane.selected_task_id() else {
+                return;
+            };
+            match crate::sync::queue::delete_task(&task_id) {
+                Ok(()) => {
+                    ui::window::set_status(app, Some("Deleted — syncing…"));
+                    ui::window::rebuild(app);
+                    crate::sync::scheduler::request_sync(app);
+                }
+                Err(reason) => {
+                    log::warn!("{reason}");
+                    ui::window::set_status(app, Some(&reason));
+                }
+            }
+        })
+        .build();
+
+    let show_help = gio::ActionEntry::builder("show-help")
+        .activate(|app: &adw::Application, _, _| show_help(app))
+        .build();
+
     app.add_action_entries([
         quit,
         about,
@@ -202,7 +233,67 @@ pub fn register_actions(app: &adw::Application) {
         connect,
         disconnect,
         preferences,
+        delete_selected,
+        show_help,
     ]);
+
+    // Keyboard shortcuts, documented in the help overlay below. Delete is
+    // deliberately scoped to the app action, which ignores it while text is
+    // being edited, rather than to a window action that could not tell.
+    app.set_accels_for_action("app.add-task", &["<Control>n"]);
+    app.set_accels_for_action("win.search", &["<Control>f"]);
+    app.set_accels_for_action("app.sync-now", &["<Control>r"]);
+    app.set_accels_for_action("app.delete-selected", &["Delete"]);
+    app.set_accels_for_action("app.show-help", &["F1"]);
+}
+
+/// The keyboard shortcuts, kept next to the actions they describe so the two
+/// cannot drift apart.
+fn show_help(app: &adw::Application) {
+    let window = gtk::ShortcutsWindow::builder()
+        .title("Keyboard Shortcuts")
+        .modal(true)
+        .build();
+
+    let tasks = gtk::ShortcutsSection::builder()
+        .title("Tasks")
+        .visible(true)
+        .build();
+    let task_group = gtk::ShortcutsGroup::builder().visible(true).build();
+    for (title, accel) in [
+        ("Focus the quick-add field", "<ctrl>n"),
+        ("Delete the selected task", "Delete"),
+        ("Cancel what is typed", "Escape"),
+    ] {
+        task_group.add_shortcut(&shortcut_row(title, accel));
+    }
+    tasks.add_group(&task_group);
+
+    let syncing = gtk::ShortcutsSection::builder()
+        .title("Finding and syncing")
+        .visible(true)
+        .build();
+    let sync_group = gtk::ShortcutsGroup::builder().visible(true).build();
+    for (title, accel) in [
+        ("Focus search", "<ctrl>f"),
+        ("Sync now", "<ctrl>r"),
+        ("Keyboard shortcuts", "F1"),
+    ] {
+        sync_group.add_shortcut(&shortcut_row(title, accel));
+    }
+    syncing.add_group(&sync_group);
+
+    window.add_section(&tasks);
+    window.add_section(&syncing);
+    window.set_transient_for(app.active_window().as_ref());
+    window.present();
+}
+
+fn shortcut_row(title: &str, accelerator: &str) -> gtk::ShortcutsShortcut {
+    gtk::ShortcutsShortcut::builder()
+        .title(title)
+        .accelerator(accelerator)
+        .build()
 }
 
 fn about_dialog() -> adw::AboutDialog {

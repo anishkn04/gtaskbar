@@ -194,6 +194,52 @@ pub fn present(app: &adw::Application) {
     }
 }
 
+/// Selects a task list in the sidebar, switching the content pane to it.
+///
+/// Used by the notification Open action. Selecting through the list box
+/// reuses the same selection handler as a click, so the content stack
+/// follows without any parallel bookkeeping.
+pub fn reveal_list(app: &adw::Application, list_id: &str) {
+    let key = crate::model::view::View::List(list_id.to_string()).key();
+    let windows = app.windows();
+    let Some(window) = windows
+        .first()
+        .and_then(|w| w.downcast_ref::<adw::ApplicationWindow>())
+    else {
+        return;
+    };
+    let Some(content) = window.content() else {
+        return;
+    };
+    fn collect(widget: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
+        out.push(widget.clone());
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            collect(&next, out);
+            child = next.next_sibling();
+        }
+    }
+    let mut all = Vec::new();
+    collect(&content.upcast(), &mut all);
+    let Some(list) = all.iter().find_map(|widget| {
+        widget
+            .downcast_ref::<gtk::ListBox>()
+            .filter(|list| list.has_css_class("gtaskbar-sidebar"))
+    }) else {
+        return;
+    };
+    let mut row = list.first_child();
+    while let Some(candidate) = row {
+        if let Some(list_row) = candidate.downcast_ref::<gtk::ListBoxRow>() {
+            if list_row.widget_name() == key {
+                list.select_row(Some(list_row));
+                return;
+            }
+        }
+        row = candidate.next_sibling();
+    }
+}
+
 /// Focus (and reveal) the quick-add entry, creating the main window if the app
 /// was launched with `--hidden` and has no window yet.
 pub fn focus_quick_add(app: &adw::Application) {
@@ -261,11 +307,11 @@ fn snapshot() -> Snapshot {
     Snapshot { lists, smart_tasks }
 }
 
-fn tasks_for(view: &crate::model::view::View, snap: &Snapshot) -> Vec<crate::store::models::Task> {
+fn tasks_for(view: &crate::model::view::View) -> Vec<(String, crate::store::models::Task)> {
     match view {
         crate::model::view::View::List(id) => {
             crate::sync::scheduler::with_store(|store| match store.tasks_in_list(id) {
-                Ok(tasks) => tasks,
+                Ok(tasks) => tasks.into_iter().map(|task| (id.clone(), task)).collect(),
                 Err(err) => {
                     log::warn!("could not read tasks for list {id}: {err}");
                     Vec::new()
@@ -274,7 +320,14 @@ fn tasks_for(view: &crate::model::view::View, snap: &Snapshot) -> Vec<crate::sto
             .unwrap_or_default()
         }
         // Every other view spans the whole account.
-        _ => snap.smart_tasks.clone(),
+        _ => crate::sync::scheduler::with_store(|store| match store.all_tasks_with_lists() {
+            Ok(pairs) => pairs,
+            Err(err) => {
+                log::warn!("could not read tasks from the cache: {err}");
+                Vec::new()
+            }
+        })
+        .unwrap_or_default(),
     }
 }
 
@@ -317,7 +370,7 @@ fn build_ui(_config: &Config) -> adw::NavigationSplitView {
         };
 
         let pane = crate::ui::tasklist_view::TaskListView::new(view.clone(), &title);
-        pane.render(&tasks_for(view, &snap));
+        pane.render(&tasks_for(view), &snap.lists);
         content_stack.add_titled(&pane.root, Some(&view.key()), &title);
         panes.push(pane);
     }
@@ -360,6 +413,84 @@ fn build_ui(_config: &Config) -> adw::NavigationSplitView {
     root.set_content(Some(&content_page));
     root.set_sidebar(Some(&build_sidebar_page(&sidebar_list, &snap)));
     root
+}
+
+/// The state banner for the content panes, if any condition needs one.
+///
+/// Priority is deliberate: an account problem outranks connectivity, because
+/// reconnecting is actionable while offline is usually transient, and a stale
+/// sync error yields to both. Nothing here replaces the toasts, which report
+/// individual writes; this is the persistent surface for states.
+pub fn banner() -> Option<adw::Banner> {
+    let (title, action) = banner_for(
+        crate::auth::session::access_token().is_some(),
+        crate::auth::credentials::refresh_token().is_some()
+            || crate::auth::credentials::ClientCredentials::load().is_some(),
+        crate::sync::scheduler::needs_reauth(),
+        crate::sync::scheduler::online(),
+        crate::sync::scheduler::last_sync_error(),
+    )?;
+    let banner = adw::Banner::new(&title);
+    match action {
+        None => {}
+        Some(BannerAction::Connect { reconnect }) => {
+            banner.set_button_label(Some(if reconnect { "Reconnect" } else { "Connect" }));
+            banner.connect_button_clicked(|_| crate::ui::connect::present());
+        }
+        Some(BannerAction::Retry) => {
+            banner.set_button_label(Some("Retry"));
+            banner.connect_button_clicked(|_| {
+                if let Some(app) = crate::running_app() {
+                    crate::sync::scheduler::request_sync(&app);
+                }
+            });
+        }
+    }
+    Some(banner)
+}
+
+/// What the banner shows, if anything.
+///
+/// Pure, so the priority order is testable without standing up windows:
+/// account problems outrank connectivity, because reconnecting is actionable
+/// while offline is usually transient, and a stale sync error yields to both.
+/// `recoverable` means credentials exist to restore with; without them the
+/// empty state (rather than a restore attempt) is the way back.
+fn banner_for(
+    connected: bool,
+    recoverable: bool,
+    needs_reauth: bool,
+    online: bool,
+    last_error: Option<String>,
+) -> Option<(String, Option<BannerAction>)> {
+    if needs_reauth {
+        return Some((
+            "Session expired — reconnect your Google account".to_string(),
+            Some(BannerAction::Connect { reconnect: true }),
+        ));
+    }
+    if !connected && !recoverable {
+        return Some((
+            "Not connected — add your Google account to load task lists".to_string(),
+            Some(BannerAction::Connect { reconnect: false }),
+        ));
+    }
+    if !online {
+        return Some((
+            "Offline — changes will sync when the network returns".to_string(),
+            None,
+        ));
+    }
+    if let Some(error) = last_error {
+        return Some((error, Some(BannerAction::Retry)));
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BannerAction {
+    Connect { reconnect: bool },
+    Retry,
 }
 
 fn build_sidebar_page(sidebar_list: &gtk::ListBox, snap: &Snapshot) -> adw::NavigationPage {
@@ -439,10 +570,57 @@ fn main_menu() -> gio::Menu {
     menu.append_section(None, &primary);
 
     let secondary = gio::Menu::new();
+    secondary.append(Some("Keyboard Shortcuts"), Some("app.show-help"));
     secondary.append(Some("Preferences"), Some("app.preferences"));
     secondary.append(Some("About GTaskbar"), Some("app.about"));
     secondary.append(Some("Quit"), Some("app.quit"));
     menu.append_section(None, &secondary);
 
     menu
+}
+
+#[cfg(test)]
+mod tests {
+    use super::banner_for;
+    use super::BannerAction;
+
+    #[test]
+    fn a_dead_session_outranks_everything() {
+        let banner = banner_for(false, false, true, false, Some("old".into())).expect("banner");
+        assert!(banner.0.contains("expired"));
+        assert_eq!(banner.1, Some(BannerAction::Connect { reconnect: true }));
+    }
+
+    #[test]
+    fn nothing_to_restore_with_means_connect() {
+        let banner = banner_for(false, false, false, true, None).expect("banner");
+        assert!(banner.0.contains("Not connected"));
+        assert_eq!(banner.1, Some(BannerAction::Connect { reconnect: false }));
+    }
+
+    #[test]
+    fn a_restore_in_flight_shows_no_banner() {
+        // Token absent but credentials present: the restore has not finished,
+        // and a banner now would flash on every launch.
+        assert!(banner_for(false, true, false, true, None).is_none());
+    }
+
+    #[test]
+    fn offline_beats_a_stale_sync_error() {
+        let banner = banner_for(true, true, false, false, Some("boom".into())).expect("banner");
+        assert!(banner.0.contains("Offline"));
+        assert_eq!(banner.1, None);
+    }
+
+    #[test]
+    fn a_failed_sync_offers_retry() {
+        let banner = banner_for(true, true, false, true, Some("boom".into())).expect("banner");
+        assert_eq!(banner.0, "boom");
+        assert_eq!(banner.1, Some(BannerAction::Retry));
+    }
+
+    #[test]
+    fn a_healthy_session_shows_nothing() {
+        assert!(banner_for(true, true, false, true, None).is_none());
+    }
 }

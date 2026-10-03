@@ -15,12 +15,12 @@ categories = ["gui", "productivity"]
 fullname = "GTaskbar"
 
 [dependencies]
-# No version feature is enabled: gdk4-sys would then require that GTK version at
-# build time, which is stricter than the app actually needs. The only 4.4+ API in
-# use is MenuButton's `primary`, which is set via the `primary` property instead
-# of the builder method, so the crate feature is unnecessary. This keeps the
-# build working on distributions still shipping GTK 4.14, such as Ubuntu 24.04.
-gtk = { package = "gtk4", version = "0.11" }
+# `v4_14` is enabled because the shortcuts window needs `add_section` and
+# friends, which are gated behind it. That is exactly the documented floor
+# (Ubuntu 24.04 ships GTK 4.14), so the minimums CI job keeps passing and no
+# supported distribution is left behind. Anything newer stays off limits: the
+# `primary` property workaround below exists precisely to avoid requiring it.
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
 glue = "0.1"
 gdk = { package = "gdk4", version = "0.11" }
 # Feature gates are the app's real minimum, not the newest the crates support.

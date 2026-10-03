@@ -1,9 +1,9 @@
 use adw::prelude::*;
-use gtk::gio;
+use gtk::glib;
 
 use super::icons;
 use crate::model::view::{self, DueBucket, View};
-use crate::store::models::{Task, TaskStatus};
+use crate::store::models::Task;
 
 /// One selectable entry in the sidebar, with its badge count.
 pub struct Entry {
@@ -148,167 +148,7 @@ fn row_for(entry: &Entry) -> gtk::ListBoxRow {
         .build()
 }
 
-/// A single task row: checkbox, title, notes preview and a due-date chip.
-pub fn task_row(task: &Task, subtask_depth: u32) -> adw::ActionRow {
-    let row = adw::ActionRow::builder()
-        .title(&task.title)
-        .activatable(false)
-        .build();
-    row.add_css_class("gtaskbar-task-row");
-
-    if task.is_completed() {
-        row.add_css_class("done");
-    }
-
-    // Subtasks are indented to mirror Google Tasks' own hierarchy.
-    if subtask_depth > 0 {
-        row.add_css_class("gtaskbar-subtask");
-    }
-
-    let check = gtk::CheckButton::builder()
-        .active(task.is_completed())
-        .valign(gtk::Align::Center)
-        .build();
-    check.add_css_class("gtaskbar-check");
-    check.add_css_class("flat");
-    check.set_tooltip_text(Some(if task.is_completed() {
-        "Mark as not done"
-    } else {
-        "Mark as done"
-    }));
-
-    // Clicking the box queues the change and applies it to the cache, then
-    // repaints and syncs, so the tick responds at once instead of flipping
-    // back on the next repaint. A failure keeps the old state and says so
-    // rather than silently doing nothing.
-    let task_id = task.id.clone();
-    let was_completed = task.is_completed();
-    check.connect_toggled(move |button| {
-        if button.is_active() == was_completed {
-            return;
-        }
-        let next = if button.is_active() {
-            TaskStatus::Completed
-        } else {
-            TaskStatus::NeedsAction
-        };
-        match crate::sync::queue::set_status(&task_id, next) {
-            Ok(()) => {
-                if let Some(app) = crate::running_app() {
-                    crate::ui::window::rebuild(&app);
-                    crate::sync::scheduler::request_sync(&app);
-                }
-            }
-            Err(reason) => {
-                log::warn!("{reason}");
-                if let Some(app) = crate::running_app() {
-                    crate::ui::window::set_status(&app, Some(&reason));
-                    crate::ui::window::rebuild(&app);
-                }
-            }
-        }
-    });
-
-    if task.is_completed() {
-        // A themed tick reads as "done" more clearly than a dimmed empty box,
-        // and reuses the icon set rather than a third visual language.
-        let tick = icons::image(icons::CHECK);
-        tick.add_css_class("gtaskbar-done-tick");
-        row.add_prefix(&tick);
-        row.remove(&check);
-    } else {
-        row.add_prefix(&check);
-    }
-
-    // A compact preview of the notes, so a task with detail is distinguishable
-    // at a glance without opening it.
-    if !task.notes.trim().is_empty() {
-        let first_line = task
-            .notes
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if !first_line.is_empty() {
-            row.set_subtitle(&first_line);
-            row.set_subtitle_lines(1);
-        }
-    }
-
-    if let Some(bucket) = due_chip(task) {
-        row.add_suffix(&bucket);
-    }
-
-    attach_menu(&row, task);
-    row
-}
-
-/// Gives a task row a right-click menu.
-///
-/// A menu rather than inline controls: a task row already carries a checkbox, a
-/// title, a notes preview and a due chip, and adding buttons for every action
-/// would crowd out the text at any reasonable width.
-fn attach_menu(row: &adw::ActionRow, task: &Task) {
-    let task_id = task.id.clone();
-
-    let menu = gio::Menu::new();
-
-    // Gio models rather than widgets: the menu is data, and building it as
-    // widgets would be a lot of code for no benefit.
-    let due_section = gio::Menu::new();
-    if task.due.is_some() {
-        due_section.append(Some("Clear due date"), Some("win.clear-due"));
-    } else {
-        due_section.append(Some("Due today"), Some("win.due-today"));
-        due_section.append(Some("Due tomorrow"), Some("win.due-tomorrow"));
-    }
-    menu.append_section(None, &due_section);
-
-    let edit = gio::Menu::new();
-    edit.append(Some("Edit…"), Some("win.edit-task"));
-    menu.append_section(None, &edit);
-
-    let danger = gio::Menu::new();
-    danger.append(Some("Delete"), Some("win.delete-task"));
-    menu.append_section(None, &danger);
-
-    let popup = gtk::PopoverMenu::from_model(Some(&menu));
-    popup.set_parent(row);
-    popup.set_has_arrow(false);
-    // ActionRow has no secondary-click target, so a right-click is handled by
-    // listening for the button directly on the row.
-    let controller = gtk::GestureClick::new();
-    controller.set_button(gdk::BUTTON_SECONDARY);
-    let popup_secondary = popup.clone();
-    controller.connect_pressed(glib::clone!(
-        #[weak]
-        popup_secondary,
-        move |_gesture, n_press, _x, _y| {
-            if n_press != 1 {
-                return;
-            }
-            popup_secondary.popup();
-        }
-    ));
-    row.add_controller(controller);
-
-    row.connect_activate(glib::clone!(
-        #[weak]
-        popup,
-        move |row| {
-            // Activating the row opens the same menu as a secondary click.
-            popup.set_pointing_to(Some(&gdk::Rectangle::new(0, 0, row.width(), 0)));
-            popup.popup();
-        }
-    ));
-
-    // The actions act on whichever row the menu was opened from, so the id is
-    // recorded on the popover's parent row and read back by each action.
-    row.set_widget_name(&format!("{TASK_ROW_PREFIX}{task_id}"));
-}
-
-fn due_chip(task: &Task) -> Option<gtk::Label> {
+pub fn due_chip(task: &Task) -> Option<gtk::Label> {
     let today = view::today();
     let due = task.due?;
 
@@ -331,65 +171,41 @@ fn due_chip(task: &Task) -> Option<gtk::Label> {
     Some(chip)
 }
 
-/// Splits tasks into the sections a grouped list shows, in bucket order.
-pub fn group_due(tasks: &[Task]) -> Vec<(&'static str, Vec<Task>)> {
+/// The same grouping over `(list id, task)` pairs, preserving membership so
+/// callers that render per-list rows never have to re-derive it.
+pub fn group_due_pairs(items: &[(String, Task)]) -> Vec<(&'static str, Vec<(String, Task)>)> {
     let today = view::today();
-    let mut sections: Vec<(&'static str, Vec<Task>)> = DueBucket::ORDER
+    let mut sections: Vec<(&'static str, Vec<(String, Task)>)> = DueBucket::ORDER
         .iter()
         .map(|b| (b.label(), Vec::new()))
         .collect();
 
-    for task in tasks {
+    for (list_id, task) in items {
         let index = DueBucket::ORDER
             .iter()
             .position(|b| *b == DueBucket::of(task, today))
             .unwrap_or(DueBucket::ORDER.len() - 1);
-        sections[index].1.push(task.clone());
+        sections[index].1.push((list_id.clone(), task.clone()));
     }
 
-    sections.retain(|(_, tasks)| !tasks.is_empty());
+    sections.retain(|(_, items)| !items.is_empty());
     sections
 }
-
-/// Resolves the task the user is acting on, by walking the window for the row
-/// whose menu was opened.
-fn target_task(window: &adw::ApplicationWindow) -> Option<String> {
-    let root = window.content()?;
-    let mut found = None;
-    let mut stack: Vec<gtk::Widget> = vec![root];
-
-    while let Some(widget) = stack.pop() {
-        if let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>() {
-            if let Some(id) = row.widget_name().strip_prefix(TASK_ROW_PREFIX) {
-                found = Some(id.to_string());
-            }
-        }
-        let mut child = widget.first_child();
-        while let Some(next) = child {
-            stack.push(next.clone());
-            child = next.first_child();
-        }
-    }
-
-    found
-}
-
-/// Widget-name prefix marking a task row and carrying its id.
-const TASK_ROW_PREFIX: &str = "gtaskbar-task:";
 
 /// Registers the window-level actions the task context menu triggers.
 ///
 /// They live on the window rather than on each row so the menu can be plain
-/// Gio data. The task the action applies to is identified by the widget that
-/// currently has focus, which is the row whose menu was opened.
+/// Gio data. Each menu carries its task as a `(list id, task id)` target, so
+/// the handlers never have to rediscover which row was opened.
 pub fn register_actions(window: &adw::ApplicationWindow) {
     use gtk::gio;
 
     // Every menu write repaints, syncs now, and says so on failure. A queued
     // change that stays invisible until the next poll reads as a dead menu.
     let due_today = gio::ActionEntry::builder("due-today")
-        .activate(|window: &adw::ApplicationWindow, _, _| {
-            let Some(id) = target_task(window) else {
+        .parameter_type(Some(glib::VariantTy::STRING))
+        .activate(|window: &adw::ApplicationWindow, _, id| {
+            let Some(id) = id.and_then(|value| value.get::<String>()) else {
                 return;
             };
             apply_menu_write(
@@ -400,8 +216,9 @@ pub fn register_actions(window: &adw::ApplicationWindow) {
         .build();
 
     let due_tomorrow = gio::ActionEntry::builder("due-tomorrow")
-        .activate(|window: &adw::ApplicationWindow, _, _| {
-            let Some(id) = target_task(window) else {
+        .parameter_type(Some(glib::VariantTy::STRING))
+        .activate(|window: &adw::ApplicationWindow, _, id| {
+            let Some(id) = id.and_then(|value| value.get::<String>()) else {
                 return;
             };
             let tomorrow = view::today() + chrono::Duration::days(1);
@@ -410,8 +227,9 @@ pub fn register_actions(window: &adw::ApplicationWindow) {
         .build();
 
     let clear_due = gio::ActionEntry::builder("clear-due")
-        .activate(|window: &adw::ApplicationWindow, _, _| {
-            let Some(id) = target_task(window) else {
+        .parameter_type(Some(glib::VariantTy::STRING))
+        .activate(|window: &adw::ApplicationWindow, _, id| {
+            let Some(id) = id.and_then(|value| value.get::<String>()) else {
                 return;
             };
             // `None` means "clear", which the API needs as an explicit null.
@@ -420,26 +238,46 @@ pub fn register_actions(window: &adw::ApplicationWindow) {
         .build();
 
     let delete_task = gio::ActionEntry::builder("delete-task")
-        .activate(|window: &adw::ApplicationWindow, _, _| {
-            let Some(id) = target_task(window) else {
+        .parameter_type(Some(glib::VariantTy::STRING))
+        .activate(|window: &adw::ApplicationWindow, _, id| {
+            let Some(id) = id.and_then(|value| value.get::<String>()) else {
                 return;
             };
             apply_menu_write(window, crate::sync::queue::delete_task(&id));
         })
         .build();
 
-    // Editing notes and titles needs a dialog, which is its own step; until then
-    // the item reports that rather than silently doing nothing.
-    let edit_task = gio::ActionEntry::builder("edit-task")
-        .activate(|window: &adw::ApplicationWindow, _, _| {
-            let Some(id) = target_task(window) else {
+    let reopen_task = gio::ActionEntry::builder("reopen-task")
+        .parameter_type(Some(glib::VariantTy::STRING))
+        .activate(|window: &adw::ApplicationWindow, _, id| {
+            let Some(id) = id.and_then(|value| value.get::<String>()) else {
                 return;
             };
-            log::info!("editing {id:?} is not wired up yet");
+            apply_menu_write(
+                window,
+                crate::sync::queue::set_status(&id, crate::store::models::TaskStatus::NeedsAction),
+            );
         })
         .build();
 
-    window.add_action_entries([due_today, due_tomorrow, clear_due, delete_task, edit_task]);
+    let edit_task = gio::ActionEntry::builder("edit-task")
+        .parameter_type(Some(glib::VariantTy::STRING))
+        .activate(|window: &adw::ApplicationWindow, _, id| {
+            let Some(id) = id.and_then(|value| value.get::<String>()) else {
+                return;
+            };
+            crate::ui::editor::present(window.upcast_ref(), &id);
+        })
+        .build();
+
+    window.add_action_entries([
+        due_today,
+        due_tomorrow,
+        clear_due,
+        delete_task,
+        reopen_task,
+        edit_task,
+    ]);
 }
 
 /// Settles a menu-initiated write: repaint and sync on success, say so on
@@ -475,6 +313,14 @@ mod tests {
     use super::*;
     use crate::store::models::TaskStatus;
     use chrono::NaiveDate;
+
+    fn paired(tasks: &[Task]) -> Vec<(String, Task)> {
+        tasks
+            .iter()
+            .cloned()
+            .map(|task| (String::new(), task))
+            .collect()
+    }
 
     fn task(id: &str, due: Option<NaiveDate>, status: TaskStatus) -> Task {
         Task {
@@ -585,7 +431,7 @@ mod tests {
             ),
             task("now", Some(today), TaskStatus::NeedsAction),
         ];
-        let sections = group_due(&tasks);
+        let sections = group_due_pairs(&paired(&tasks));
         let labels: Vec<_> = sections.iter().map(|(l, _)| *l).collect();
         assert_eq!(
             labels,
@@ -606,7 +452,10 @@ mod tests {
             ),
             task("now", Some(today), TaskStatus::NeedsAction),
         ];
-        let labels: Vec<_> = group_due(&tasks).iter().map(|(l, _)| *l).collect();
+        let labels: Vec<_> = group_due_pairs(&paired(&tasks))
+            .iter()
+            .map(|(l, _)| *l)
+            .collect();
         assert_eq!(labels, vec!["Today", "Later", "No date"]);
     }
 
@@ -614,7 +463,7 @@ mod tests {
     fn an_undated_task_still_lands_in_a_group() {
         // A task that fits no section would silently vanish from a grouped list.
         let tasks = vec![task("none", None, TaskStatus::NeedsAction)];
-        let sections = group_due(&tasks);
+        let sections = group_due_pairs(&paired(&tasks));
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].0, "No date");
     }

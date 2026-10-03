@@ -1,8 +1,13 @@
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use adw::prelude::*;
+use glib::subclass::prelude::*;
+use gtk::{gdk, gio, glib};
 
 use super::icons;
+use crate::config::GroupMode;
 use crate::model::view::{self, View};
 use crate::store::models::Task;
 
@@ -12,10 +17,27 @@ pub struct TaskListView {
     pub root: adw::NavigationPage,
     search: gtk::SearchEntry,
     stack: adw::ViewStack,
-    list: gtk::ListBox,
+    scroller: gtk::ScrolledWindow,
     quick_add: adw::EntryRow,
     view: View,
     today: chrono::NaiveDate,
+    store: gio::ListStore,
+    selection: gtk::SingleSelection,
+    /// The last inputs render ran on, so search text and collapse toggles can
+    /// repaint without going back to the cache.
+    source: Rc<RefCell<Source>>,
+    search_text: Rc<RefCell<String>>,
+    collapsed: Rc<RefCell<HashSet<String>>>,
+}
+
+/// Everything a repaint needs, kept so later repaints do not re-query.
+#[derive(Default)]
+struct Source {
+    /// `(list id, task)` pairs in no particular order; sorting happens in
+    /// `render` through `assemble`, exactly as before.
+    items: Vec<(String, Task)>,
+    lists: Vec<(String, String)>,
+    group: GroupMode,
 }
 
 thread_local! {
@@ -42,8 +64,6 @@ pub fn register_panes(panes: Vec<TaskListView>) {
 /// This checks `mapped`, not `visible`: `AdwViewStack` unmaps hidden pages
 /// without clearing their visibility flag, so every pane reports
 /// `is_visible() == true` and a lookup on it always returns the first pane.
-/// That misdirected quick-add into the fallback list no matter what the user
-/// was viewing.
 pub fn visible_pane() -> Option<TaskListView> {
     PANES.with(|slot| {
         slot.borrow()
@@ -58,20 +78,6 @@ pub fn focus_quick_add() {
     if let Some(pane) = visible_pane() {
         pane.focus_quick_add();
     }
-}
-
-/// Whether any pane's quick-add holds unsubmitted text.
-///
-/// A background sync that changed tasks triggers a repaint, but rebuilding
-/// while the user is mid-sentence would destroy the entry widget and eat what
-/// they typed. Callers skip the repaint in that case; the next sync or any
-/// manual refresh picks the changes up.
-pub fn any_quick_add_has_text() -> bool {
-    PANES.with(|slot| {
-        slot.borrow()
-            .iter()
-            .any(|pane| !pane.quick_add.text().trim().is_empty())
-    })
 }
 
 /// Moves keyboard focus to the search field of the visible pane.
@@ -113,6 +119,13 @@ impl TaskListView {
         // possible.
         let quick_add = adw::EntryRow::builder().title("Add a task").build();
         quick_add.add_css_class("gtaskbar-quick-add");
+        // The row template carries an apply button and indicator icons under
+        // `adw-*-symbolic` names, none of which this system's icon theme ships
+        // (see docs/icons.md). Unresolvable, they paint as a stray glyph at the
+        // row's edge. Submission is Enter-driven through the key controller
+        // below, so the button is hidden rather than left broken.
+        quick_add.set_show_apply_button(false);
+        icons::hide_unresolvable_indicators(&quick_add);
 
         // Return and keypad Enter submit, whatever the modifiers: this is a
         // single-line field, so there is no newline to protect.
@@ -137,15 +150,31 @@ impl TaskListView {
         keys.connect_key_pressed(move |_, keyval, _, _| {
             let submit_key = matches!(keyval.name().as_deref(), Some("Return" | "KP_Enter"));
             if !submit_key {
-                return gtk::glib::Propagation::Proceed;
+                return glib::Propagation::Proceed;
             }
             if let Some(entry) = row.upgrade() {
                 let failed = !submit_quick_add(&entry);
                 SUBMIT_FAILED.with(|flag| *flag.borrow_mut() = failed);
             }
-            gtk::glib::Propagation::Proceed
+            glib::Propagation::Proceed
         });
         quick_add.add_controller(keys);
+
+        // Escape cancels: clears whatever was typed, so a half-written
+        // thought does not linger in the row.
+        let cancel = gtk::EventControllerKey::new();
+        cancel.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let cancel_row = quick_add.downgrade();
+        cancel.connect_key_pressed(move |_, keyval, _, _| {
+            if !matches!(keyval.name().as_deref(), Some("Escape")) {
+                return gtk::glib::Propagation::Proceed;
+            }
+            if let Some(entry) = cancel_row.upgrade() {
+                entry.set_text("");
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        quick_add.add_controller(cancel);
 
         quick_add.connect_apply(move |entry| {
             if SUBMIT_FAILED.take() {
@@ -155,16 +184,59 @@ impl TaskListView {
         });
 
         // --- list ------------------------------------------------------
-        let list = gtk::ListBox::builder()
-            .selection_mode(gtk::SelectionMode::None)
-            .css_classes(["boxed-list"])
-            .build();
-        list.add_css_class("gtaskbar-task-list");
+        // A real ListView rather than a ListBox: the model holds the rows, so
+        // a list of any size costs one widget per visible row instead of one
+        // per task.
+        let store = gio::ListStore::new::<TaskRowObject>();
+        let selection = gtk::SingleSelection::new(Some(store.clone()));
+        selection.set_autoselect(false);
+        selection.set_can_unselect(true);
+
+        let factory = gtk::SignalListItemFactory::new();
+        factory.connect_setup(|_, item| {
+            let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            list_item.set_child(Option::<&gtk::Widget>::None);
+        });
+        factory.connect_bind(|_, item| {
+            let Some(list_item) = item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let Some(row) = list_item
+                .item()
+                .and_then(|object| object.downcast::<TaskRowObject>().ok())
+            else {
+                return;
+            };
+            fill_row(list_item, &row);
+        });
+
+        let list_view = gtk::ListView::new(Some(selection.clone()), Some(factory.clone()));
+        // Drops on empty area append at the end of the dragged task's
+        // siblings; drops onto rows are handled per row.
+        let end_target = gtk::DropTarget::new(glib::types::Type::STRING, gdk::DragAction::MOVE);
+        end_target.connect_drop(|_, value, _, _| {
+            let Ok(dragged) = value.get::<String>() else {
+                return false;
+            };
+            drop_at_end(&dragged)
+        });
+        list_view.add_controller(end_target);
+        list_view.add_css_class("gtaskbar-task-list");
+        // Open the same menu as a secondary click.
+        list_view.connect_activate({
+            let selection = selection.clone();
+            let list_view = list_view.clone();
+            move |_, position| {
+                popup_for_selected(&list_view, &selection, position);
+            }
+        });
 
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&list)
+            .child(&list_view)
             .build();
 
         let empty = adw::StatusPage::builder()
@@ -179,6 +251,11 @@ impl TaskListView {
 
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
+        // A persistent state surface: offline, failed syncs and dead sessions
+        // show here rather than only as transient toasts.
+        if let Some(banner) = super::window::banner() {
+            toolbar.add_bottom_bar(&banner);
+        }
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&quick_add);
         content.append(&stack);
@@ -189,62 +266,134 @@ impl TaskListView {
             .child(&toolbar)
             .build();
 
+        let search_text = Rc::new(RefCell::new(String::new()));
+        let collapsed = Rc::new(RefCell::new(HashSet::new()));
+
         let me = Self {
             root: page,
             search: search.clone(),
             stack,
-            list,
+            scroller,
             quick_add,
             view,
             today,
+            store,
+            selection,
+            source: Rc::new(RefCell::new(Source::default())),
+            search_text: search_text.clone(),
+            collapsed: collapsed.clone(),
         };
-        me.render(&[]);
+        me.render(&[], &[]);
 
         // Wired after construction because the handler needs the pane, which
         // only exists once `me` is built.
         let pane = me.clone();
         search.connect_search_changed(move |entry| {
-            pane.apply_filter(&entry.text());
+            pane.set_search(&entry.text());
         });
 
         me
     }
 
     /// Replaces the contents, applying the active sort and grouping.
-    pub fn render(&self, tasks: &[Task]) {
+    pub fn render(&self, items: &[(String, Task)], lists: &[(String, String, usize)]) {
         let config = crate::config::Config::load();
-        let sorted = view::assemble(&self.view, tasks.to_vec(), self.today, config.sort_mode);
+        {
+            let mut source = self.source.borrow_mut();
+            source.items = items.to_vec();
+            source.lists = lists
+                .iter()
+                .map(|(id, title, _)| (id.clone(), title.clone()))
+                .collect();
+            source.group = config.group_mode;
+        }
+        self.refresh_store(&config);
+    }
 
-        while let Some(child) = self.list.first_child() {
-            self.list.remove(&child);
+    /// Rebuilds the model from the last inputs: search text, collapse state
+    /// and config. The scroll position and the selection survive, by task id
+    /// rather than by row, so typing in search or toggling an expander does
+    /// not throw the view back to the top.
+    fn refresh_store(&self, config: &crate::config::Config) {
+        let (tasks, lists, group, search, collapsed) = {
+            let source = self.source.borrow();
+            (
+                source.items.clone(),
+                source.lists.clone(),
+                source.group,
+                self.search_text.borrow().clone(),
+                self.collapsed.borrow().clone(),
+            )
+        };
+
+        let assembled = {
+            let plain: Vec<Task> = tasks.iter().map(|(_, task)| task.clone()).collect();
+            view::assemble(&self.view, plain, self.today, config.sort_mode)
+        };
+        // The assembled order is authoritative; re-attach each task's list by
+        // id so grouping and row wiring cannot disagree about membership.
+        let id_to_list: HashMap<&str, &str> = tasks
+            .iter()
+            .map(|(list_id, task)| (task.id.as_str(), list_id.as_str()))
+            .collect();
+        let ordered: Vec<(String, Task)> = assembled
+            .into_iter()
+            .filter_map(|task| {
+                id_to_list
+                    .get(task.id.as_str())
+                    .map(|list_id| (list_id.to_string(), task))
+            })
+            .collect();
+
+        let rows = build_items(&ordered, &lists, group, &search, &collapsed);
+
+        let selected_id = self
+            .selection
+            .selected_item()
+            .and_then(|object| object.downcast::<TaskRowObject>().ok())
+            .and_then(|row| row.task_id());
+        let scroll = self.scroller.vadjustment().value();
+
+        self.store.remove_all();
+        for row in &rows {
+            self.store.append(&TaskRowObject::new(row.clone()));
         }
 
-        // Subtasks are shown beneath their parent, so the depth is resolved
-        // once and passed down rather than recomputed per row.
-        let mut rendered = 0usize;
-
-        match config.group_mode {
-            crate::config::GroupMode::ByDue => {
-                for (label, section) in super::sidebar::group_due(&sorted) {
-                    self.list.append(&header_row(label));
-                    for task in &section {
-                        self.list
-                            .append(&super::sidebar::task_row(task, depth_of(task, &sorted)));
-                        rendered += 1;
-                    }
-                }
-            }
-            _ => {
-                for task in &sorted {
-                    self.list
-                        .append(&super::sidebar::task_row(task, depth_of(task, &sorted)));
-                    rendered += 1;
+        if let Some(wanted) = selected_id {
+            for (index, row) in rows.iter().enumerate() {
+                if row.task_id() == Some(wanted.as_str()) {
+                    self.selection.set_selected(index as u32);
+                    break;
                 }
             }
         }
+        let adjustment = self.scroller.vadjustment();
+        adjustment.set_value(
+            scroll
+                .min(adjustment.upper() - adjustment.page_size())
+                .max(0.0),
+        );
 
         self.stack
-            .set_visible_child_name(if rendered == 0 { "empty" } else { "list" });
+            .set_visible_child_name(if rows.is_empty() { "empty" } else { "list" });
+    }
+
+    /// Whether the user is typing in this pane's text fields.
+    ///
+    /// Global shortcuts that act on tasks (notably Delete) stand down while
+    /// this is true: otherwise editing text could delete whatever happens to
+    /// be selected.
+    pub fn editing_text(&self) -> bool {
+        self.quick_add.has_focus() || self.search.has_focus()
+    }
+
+    /// The selected task, if the selection is on a task row rather than a
+    /// header or nothing.
+    pub fn selected_task_id(&self) -> Option<String> {
+        self.selection
+            .selected_item()
+            .and_then(|object| object.downcast::<TaskRowObject>().ok())
+            .and_then(|row| row.task_id())
     }
 
     /// The list this pane shows, if it shows one list rather than a smart view.
@@ -263,71 +412,37 @@ impl TaskListView {
         self.quick_add.grab_focus();
     }
 
-    /// Feeds a search term through to the rows, hiding those that do not match.
-    ///
-    /// Matches titles and notes, case-insensitively. An empty term restores
-    /// every row, so the field doubles as a toggle rather than something that
-    /// has to be cleared by hand.
-    pub fn apply_filter(&self, term: &str) {
-        let needle = term.trim().to_lowercase();
-        let mut visible_rows = 0usize;
-
-        for row in self.rows() {
-            // Section headers belong to the tasks below them, so they are
-            // hidden and restored together with the group they label.
-            if row.widget_name() == HEADER_ROW {
-                continue;
-            }
-
-            let matches = needle.is_empty() || row_text(&row).contains(&needle);
-            row.set_visible(matches);
-            if matches {
-                visible_rows += 1;
-            }
-        }
-
-        let _ = visible_rows;
-        self.update_header_visibility(&needle);
+    fn set_search(&self, term: &str) {
+        *self.search_text.borrow_mut() = term.trim().to_lowercase();
+        let config = crate::config::Config::load();
+        self.refresh_store(&config);
     }
 
-    /// Hides a section header when every task it labels is filtered out, so the
-    /// list does not show a heading with nothing under it.
-    fn update_header_visibility(&self, needle: &str) {
-        if needle.is_empty() {
-            for row in self.rows().iter().filter(|r| r.widget_name() == HEADER_ROW) {
-                row.set_visible(true);
+    /// Collapses or expands a parent task, hiding or revealing its subtasks.
+    pub fn toggle_collapsed(&self, task_id: &str) {
+        {
+            let mut collapsed = self.collapsed.borrow_mut();
+            if !collapsed.remove(task_id) {
+                collapsed.insert(task_id.to_string());
             }
-            return;
         }
-
-        let rows = self.rows();
-        for (index, row) in rows.iter().enumerate() {
-            if row.widget_name() != HEADER_ROW {
-                continue;
-            }
-            // Any following task row that survived the filter means this header
-            // still has content.
-            let has_visible_task = rows
-                .iter()
-                .skip(index + 1)
-                .take_while(|next| next.widget_name() == HEADER_ROW || is_task_row(next))
-                .any(|next| next.widget_name() != HEADER_ROW && next.is_visible());
-
-            row.set_visible(has_visible_task);
-        }
+        let config = crate::config::Config::load();
+        self.refresh_store(&config);
     }
+}
 
-    fn rows(&self) -> Vec<gtk::ListBoxRow> {
-        let mut rows = Vec::new();
-        let mut current = self.list.first_child();
-        while let Some(widget) = current {
-            if let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>() {
-                rows.push(row.clone());
-            }
-            current = widget.first_child();
-        }
-        rows
-    }
+/// Whether any pane's quick-add holds unsubmitted text.
+///
+/// A background sync that changed tasks triggers a repaint, but rebuilding
+/// while the user is mid-sentence would destroy the entry widget and eat what
+/// they typed. Callers skip the repaint in that case; the next sync or any
+/// manual refresh picks the changes up.
+pub fn any_quick_add_has_text() -> bool {
+    PANES.with(|slot| {
+        slot.borrow()
+            .iter()
+            .any(|pane| !pane.quick_add.text().trim().is_empty())
+    })
 }
 
 /// Submits the quick-add entry: queue the task, confirm, and sync now.
@@ -383,46 +498,614 @@ fn submit_quick_add(entry: &adw::EntryRow) -> bool {
     }
 }
 
-/// Widget name marking a section header row.
-const HEADER_ROW: &str = "gtaskbar-header";
-
-fn is_task_row(row: &gtk::ListBoxRow) -> bool {
-    row.widget_name() != HEADER_ROW
+/// One row of the list model: either a section header or a task.
+///
+/// Headers carry only a label; tasks carry everything the factory needs so a
+/// rebind never has to look anything up.
+#[derive(Debug, Clone)]
+pub enum RowItem {
+    Header { label: String },
+    Task(Box<TaskRow>),
 }
 
-/// The searchable text of a task row: title and notes.
-fn row_text(row: &gtk::ListBoxRow) -> String {
-    // The child has to be bound before downcasting, because downcast_ref
-    // borrows from the temporary.
-    let child = row.child();
-    let Some(action) = child
-        .as_ref()
-        .and_then(|c| c.downcast_ref::<adw::ActionRow>())
-    else {
-        return String::new();
+/// A task row with everything the factory binds, resolved once at model time.
+#[derive(Debug, Clone)]
+pub struct TaskRow {
+    task: Task,
+    list_id: String,
+    depth: u32,
+    has_children: bool,
+    collapsed: bool,
+}
+
+impl RowItem {
+    fn task_id(&self) -> Option<&str> {
+        match self {
+            RowItem::Header { .. } => None,
+            RowItem::Task(row) => Some(row.task.id.as_str()),
+        }
+    }
+}
+
+mod imp {
+    use super::RowItem;
+    use std::cell::RefCell;
+
+    use glib::subclass::prelude::*;
+
+    #[derive(Default)]
+    pub struct TaskRowObject {
+        pub item: RefCell<Option<RowItem>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for TaskRowObject {
+        const NAME: &'static str = "GtaskbarRow";
+        type Type = super::TaskRowObject;
+    }
+
+    impl ObjectImpl for TaskRowObject {}
+}
+
+glib::wrapper! {
+    pub struct TaskRowObject(ObjectSubclass<imp::TaskRowObject>);
+}
+
+impl TaskRowObject {
+    fn new(item: RowItem) -> Self {
+        let object: Self = glib::Object::new();
+        *object.imp().item.borrow_mut() = Some(item);
+        object
+    }
+
+    fn item(&self) -> RowItem {
+        self.imp()
+            .item
+            .borrow()
+            .clone()
+            .expect("row items are set at construction")
+    }
+
+    fn task_id(&self) -> Option<String> {
+        self.item().task_id().map(str::to_string)
+    }
+}
+
+/// Assembles the model rows: sorted tasks plus the section headers grouping
+/// demands, minus whatever search and collapse hide.
+///
+/// Pure: no widgets, no database. Headers are emitted only for sections that
+/// still hold a visible task, so filtering can never strand a heading.
+fn build_items(
+    ordered: &[(String, Task)],
+    lists: &[(String, String)],
+    group: GroupMode,
+    search: &str,
+    collapsed: &HashSet<String>,
+) -> Vec<RowItem> {
+    // Children by parent id, so each row knows whether it can expand.
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (_, task) in ordered {
+        if let Some(parent) = task.parent.as_deref() {
+            children.entry(parent).or_default().push(task.id.as_str());
+        }
+    }
+
+    let visible = |task: &Task| {
+        if task.is_completed() {
+            return false;
+        }
+        if search.is_empty() {
+            return true;
+        }
+        let haystack = format!("{} {}", task.title, task.notes).to_lowercase();
+        haystack.contains(search)
     };
-    format!(
-        "{} {}",
-        action.title(),
-        action.subtitle().unwrap_or_default()
-    )
-    .to_lowercase()
+
+    // A task hides when any ancestor is collapsed. Orphans (a parent outside
+    // the set) cannot be hidden by something invisible, so they stay.
+    let in_set: HashSet<&str> = ordered.iter().map(|(_, t)| t.id.as_str()).collect();
+    let hidden = |task: &Task| {
+        let mut parent = task.parent.as_deref();
+        let mut guard = 0usize;
+        while let Some(id) = parent {
+            if collapsed.contains(id) {
+                return true;
+            }
+            if !in_set.contains(id) {
+                return false;
+            }
+            guard += 1;
+            if guard > ordered.len() {
+                return false;
+            }
+            parent = ordered
+                .iter()
+                .find(|(_, t)| t.id.as_str() == id)
+                .and_then(|(_, t)| t.parent.as_deref());
+        }
+        false
+    };
+
+    let mut rows = Vec::new();
+    let push_section =
+        |label: Option<&str>, section: &[(String, Task)], rows: &mut Vec<RowItem>| {
+            let shown: Vec<&(String, Task)> = section
+                .iter()
+                .filter(|(_, task)| visible(task) && !hidden(task))
+                .collect();
+            if shown.is_empty() {
+                return;
+            }
+            if let Some(label) = label.filter(|label| !label.is_empty()) {
+                rows.push(RowItem::Header {
+                    label: label.to_string(),
+                });
+            }
+            for (list_id, task) in shown {
+                rows.push(RowItem::Task(Box::new(TaskRow {
+                    task: (*task).clone(),
+                    list_id: list_id.clone(),
+                    depth: depth_of(task, &section_tasks(section)),
+                    has_children: children.contains_key(task.id.as_str()),
+                    collapsed: collapsed.contains(task.id.as_str()),
+                })));
+            }
+        };
+
+    match group {
+        GroupMode::ByDue => {
+            for (label, section) in super::sidebar::group_due_pairs(ordered) {
+                push_section(Some(label), &section, &mut rows);
+            }
+        }
+        GroupMode::ByList => {
+            for (id, title) in lists {
+                let section: Vec<(String, Task)> = ordered
+                    .iter()
+                    .filter(|(list_id, _)| list_id == id)
+                    .cloned()
+                    .collect();
+                push_section(Some(title), &section, &mut rows);
+            }
+        }
+        GroupMode::ByStatus => {
+            let section = |completed: bool| {
+                ordered
+                    .iter()
+                    .filter(|(_, task)| task.is_completed() == completed)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            // Completed tasks never reach a non-Completed view, so this is
+            // usually a single "Open" section; the Completed view mirrors it.
+            push_section(Some("Open"), &section(false), &mut rows);
+            push_section(Some("Done"), &section(true), &mut rows);
+        }
+        GroupMode::None => {
+            push_section(None, ordered, &mut rows);
+        }
+    }
+
+    rows
 }
 
-fn header_row(label: &str) -> gtk::ListBoxRow {
-    let text = gtk::Label::builder().label(label).xalign(0.0).build();
-    text.add_css_class("gtaskbar-group-header");
-    let row = gtk::ListBoxRow::builder()
-        .activatable(false)
-        .selectable(false)
-        .child(&text)
+/// The tasks of a section, for depth resolution.
+fn section_tasks(section: &[(String, Task)]) -> Vec<Task> {
+    section.iter().map(|(_, task)| task.clone()).collect()
+}
+
+/// Fills a row widget from its item.
+///
+/// The content is rebuilt on every bind rather than updated in place: rows are
+/// recycled across items, and rebuilding means handlers always capture the
+/// current task instead of a stale one, with no guard bookkeeping. Unparented
+/// widgets are finalised with their handlers, so nothing leaks.
+fn fill_row(list_item: &gtk::ListItem, row: &TaskRowObject) {
+    list_item.set_child(Option::<&gtk::Widget>::None);
+    match row.item() {
+        RowItem::Header { label } => {
+            list_item.set_selectable(false);
+            list_item.set_activatable(false);
+            let text = gtk::Label::builder().label(label).xalign(0.0).build();
+            text.add_css_class("gtaskbar-group-header");
+            list_item.set_child(Some(&text));
+        }
+        RowItem::Task(task_row) => {
+            list_item.set_selectable(true);
+            list_item.set_activatable(true);
+            list_item.set_child(Some(&build_task_row(
+                &task_row.task,
+                task_row.depth,
+                task_row.has_children,
+                task_row.collapsed,
+            )));
+        }
+    }
+}
+
+/// Builds one task row: expander, checkbox, and the title/notes/due content.
+///
+/// Everything is fresh per bind, so every handler below captures the task it
+/// was built for. There is deliberately no shared or recycled state here.
+fn build_task_row(task: &Task, depth: u32, has_children: bool, collapsed: bool) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    row.set_margin_top(6);
+    row.set_margin_bottom(6);
+    row.set_margin_start(6);
+    row.set_margin_end(6);
+
+    if has_children {
+        let expander = gtk::Button::builder()
+            .icon_name(if collapsed {
+                "pan-end-symbolic"
+            } else {
+                "pan-down-symbolic"
+            })
+            .tooltip_text(if collapsed {
+                "Expand subtasks"
+            } else {
+                "Collapse subtasks"
+            })
+            .css_classes(["flat", "gtaskbar-expander"])
+            .valign(gtk::Align::Center)
+            .build();
+        let task_id = task.id.clone();
+        expander.connect_clicked(move |_| {
+            if let Some(pane) = visible_pane() {
+                pane.toggle_collapsed(&task_id);
+            }
+        });
+        row.append(&expander);
+    }
+    if depth > 0 {
+        row.add_css_class("gtaskbar-subtask");
+    }
+
+    let check = gtk::CheckButton::builder()
+        .active(task.is_completed())
+        .tooltip_text(if task.is_completed() {
+            "Mark as not done"
+        } else {
+            "Mark as done"
+        })
+        .valign(gtk::Align::Center)
         .build();
-    row.set_widget_name(HEADER_ROW);
-    row
+    check.add_css_class("gtaskbar-check");
+    check.add_css_class("flat");
+    if task.is_completed() {
+        // A themed tick reads as "done" more clearly than a dimmed empty box.
+        let tick = icons::image(icons::CHECK);
+        tick.add_css_class("gtaskbar-done-tick");
+        row.append(&tick);
+    } else {
+        let task_id = task.id.clone();
+        check.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            match crate::sync::queue::set_status(
+                &task_id,
+                crate::store::models::TaskStatus::Completed,
+            ) {
+                Ok(()) => {
+                    if let Some(app) = crate::running_app() {
+                        crate::ui::window::rebuild(&app);
+                        crate::sync::scheduler::request_sync(&app);
+                    }
+                }
+                Err(reason) => {
+                    log::warn!("{reason}");
+                    if let Some(app) = crate::running_app() {
+                        crate::ui::window::set_status(&app, Some(&reason));
+                        crate::ui::window::rebuild(&app);
+                    }
+                }
+            }
+        });
+        row.append(&check);
+    }
+
+    let content = adw::ActionRow::builder()
+        .title(&task.title)
+        .activatable(false)
+        .hexpand(true)
+        .build();
+    content.add_css_class("gtaskbar-task-row");
+    if task.is_completed() {
+        content.add_css_class("done");
+    }
+    if !task.notes.trim().is_empty() {
+        let first_line = task
+            .notes
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !first_line.is_empty() {
+            content.set_subtitle(&first_line);
+            content.set_subtitle_lines(1);
+        }
+    }
+    if let Some(chip) = super::sidebar::due_chip(task) {
+        content.add_suffix(&chip);
+    }
+    row.append(&content);
+
+    // Unchecking a completed task: the tick is display-only, so the row needs
+    // a way back. A secondary click opens the same menu as every row, and the
+    // menu is also where due dates and deletion live.
+    let press = gtk::GestureClick::new();
+    press.set_button(gdk::BUTTON_SECONDARY);
+    let press_task = task.id.clone();
+    let press_completed = task.is_completed();
+    let press_row = row.clone();
+    press.connect_pressed(move |gesture, n_press, _, _| {
+        if n_press != 1 {
+            return;
+        }
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        popup_for_task(&press_row, &press_task, press_completed);
+    });
+    row.add_controller(press);
+
+    // Drag to reorder, Manual sort only: the drop target below validates the
+    // mode, the list and the parent, so starting a drag is always harmless.
+    // Positions are the server's opaque ordering key and cannot be computed
+    // locally, so the row visibly moves when the flush comes back.
+    let drag_task = task.id.clone();
+    let drag = gtk::DragSource::new();
+    drag.set_actions(gdk::DragAction::MOVE);
+    drag.set_content(Some(&gdk::ContentProvider::for_value(
+        &drag_task.to_value(),
+    )));
+    row.add_controller(drag);
+
+    // Drop onto a row means "insert before it". The handler validates the
+    // mode, the list and the parent, so an invalid drop is silently refused
+    // the way drag-and-drop targets normally behave.
+    let drop_task = task.id.clone();
+    let drop_target = gtk::DropTarget::new(glib::types::Type::STRING, gdk::DragAction::MOVE);
+    drop_target.connect_drop(move |_, value, _, _| {
+        let Ok(dragged) = value.get::<String>() else {
+            return false;
+        };
+        drop_before(&dragged, &drop_task)
+    });
+    row.add_controller(drop_target);
+
+    row.upcast()
 }
 
-/// How deeply a task should be indented: 0 for a top-level task, 1 for a direct
-/// subtask, and so on for deeper nesting.
+/// Rows of the visible pane in display order: task id, list id, parent.
+fn ordered_rows(pane: &TaskListView) -> Vec<(String, String, Option<String>)> {
+    let Some(model) = pane.selection.model() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for index in 0..model.n_items() {
+        let Some(row) = model
+            .item(index)
+            .and_then(|object| object.downcast::<TaskRowObject>().ok())
+        else {
+            continue;
+        };
+        if let RowItem::Task(task_row) = row.item() {
+            out.push((
+                task_row.task.id.clone(),
+                task_row.list_id.clone(),
+                task_row.task.parent.clone(),
+            ));
+        }
+    }
+    out
+}
+
+/// Moves the dragged task to just before the target row.
+///
+/// Only sibling reordering within one list and one parent, in Manual sort:
+/// positions are the server's opaque key, anything else has no well-defined
+/// meaning. Returns whether the drop was accepted.
+fn drop_before(dragged_id: &str, target_id: &str) -> bool {
+    if dragged_id == target_id {
+        return false;
+    }
+    if crate::config::Config::load().sort_mode != crate::config::SortMode::Manual {
+        return false;
+    }
+    let Some(pane) = visible_pane() else {
+        return false;
+    };
+    let rows = ordered_rows(&pane);
+    let locate = |id: &str| rows.iter().find(|(task_id, _, _)| task_id == id).cloned();
+    let (Some((_, drag_list, drag_parent)), Some((_, target_list, target_parent))) =
+        (locate(dragged_id), locate(target_id))
+    else {
+        return false;
+    };
+    if drag_list != target_list || drag_parent != target_parent {
+        return false;
+    }
+
+    // Siblings in display order without the dragged task; the task before the
+    // target is what it must follow, or nothing to move first.
+    let siblings: Vec<&String> = rows
+        .iter()
+        .filter(|(task_id, list_id, parent)| {
+            task_id != dragged_id && list_id == &drag_list && parent == &drag_parent
+        })
+        .map(|(task_id, _, _)| task_id)
+        .collect();
+    let Some(position) = siblings.iter().position(|id| *id == target_id) else {
+        return false;
+    };
+    let previous: Option<String> = if position == 0 {
+        None
+    } else {
+        Some(siblings[position - 1].clone())
+    };
+
+    // Already there: accept without a pointless round-trip.
+    let full: Vec<&String> = rows
+        .iter()
+        .filter(|(_, list_id, parent)| list_id == &drag_list && parent == &drag_parent)
+        .map(|(task_id, _, _)| task_id)
+        .collect();
+    if let Some(dragged_at) = full.iter().position(|id| *id == dragged_id) {
+        let current: Option<&String> = if dragged_at == 0 {
+            None
+        } else {
+            Some(full[dragged_at - 1])
+        };
+        if current == previous.as_ref() {
+            return true;
+        }
+    }
+
+    match crate::sync::queue::move_task(dragged_id, None, Some(previous)) {
+        Ok(()) => {
+            if let Some(app) = crate::running_app() {
+                crate::ui::window::set_status(&app, Some("Moved — syncing…"));
+                crate::sync::scheduler::request_sync(&app);
+            }
+            true
+        }
+        Err(reason) => {
+            log::warn!("{reason}");
+            if let Some(app) = crate::running_app() {
+                crate::ui::window::set_status(&app, Some(&reason));
+            }
+            true
+        }
+    }
+}
+
+/// Moves the dragged task to the end of its siblings.
+///
+/// The drop target for empty list area. Same rules as `drop_before`: Manual
+/// sort, one list, one parent.
+fn drop_at_end(dragged_id: &str) -> bool {
+    if crate::config::Config::load().sort_mode != crate::config::SortMode::Manual {
+        return false;
+    }
+    let Some(pane) = visible_pane() else {
+        return false;
+    };
+    let rows = ordered_rows(&pane);
+    let Some((_, drag_list, drag_parent)) = rows
+        .iter()
+        .find(|(task_id, _, _)| task_id == dragged_id)
+        .cloned()
+    else {
+        return false;
+    };
+    let siblings: Vec<&String> = rows
+        .iter()
+        .filter(|(task_id, list_id, parent)| {
+            task_id != dragged_id && list_id == &drag_list && parent == &drag_parent
+        })
+        .map(|(task_id, _, _)| task_id)
+        .collect();
+    // Already last (or alone): accept without a round-trip.
+    let full: Vec<&String> = rows
+        .iter()
+        .filter(|(_, list_id, parent)| list_id == &drag_list && parent == &drag_parent)
+        .map(|(task_id, _, _)| task_id)
+        .collect();
+    if full.last().is_some_and(|last| *last == dragged_id) {
+        return true;
+    }
+    let previous = siblings.last().map(|id| id.to_string());
+
+    match crate::sync::queue::move_task(dragged_id, None, Some(previous)) {
+        Ok(()) => {
+            if let Some(app) = crate::running_app() {
+                crate::ui::window::set_status(&app, Some("Moved — syncing…"));
+                crate::sync::scheduler::request_sync(&app);
+            }
+            true
+        }
+        Err(reason) => {
+            log::warn!("{reason}");
+            if let Some(app) = crate::running_app() {
+                crate::ui::window::set_status(&app, Some(&reason));
+            }
+            true
+        }
+    }
+}
+
+/// Opens the menu for the activated row, selecting it first so keyboard and
+/// pointer activation agree on the target.
+fn popup_for_selected(
+    parent: &impl IsA<gtk::Widget>,
+    selection: &gtk::SingleSelection,
+    position: u32,
+) {
+    selection.set_selected(position);
+    let Some(row) = selection
+        .selected_item()
+        .and_then(|object| object.downcast::<TaskRowObject>().ok())
+    else {
+        return;
+    };
+    if let RowItem::Task(task_row) = row.item() {
+        popup_for_task(parent, &task_row.task.id, task_row.task.is_completed());
+    }
+}
+
+/// Opens the task menu: due-date changes, edit, reopening, delete.
+///
+/// The menu carries the task id as each action's target; the queue resolves
+/// the list from the cache, which also covers tasks that moved since the menu
+/// was built. Completed rows get a way back, since their checkbox is replaced
+/// by a display-only tick.
+fn popup_for_task(parent: &impl IsA<gtk::Widget>, task_id: &str, completed: bool) {
+    let target = task_id.to_variant();
+
+    let menu = gio::Menu::new();
+    if completed {
+        let reopen = gio::Menu::new();
+        reopen.append_item(&targeted_item(
+            "Mark as not done",
+            "win.reopen-task",
+            &target,
+        ));
+        menu.append_section(None, &reopen);
+    }
+    let due_section = gio::Menu::new();
+    due_section.append_item(&targeted_item("Due today", "win.due-today", &target));
+    due_section.append_item(&targeted_item("Due tomorrow", "win.due-tomorrow", &target));
+    due_section.append_item(&targeted_item("Clear due date", "win.clear-due", &target));
+    menu.append_section(None, &due_section);
+
+    let edit = gio::Menu::new();
+    edit.append_item(&targeted_item("Edit…", "win.edit-task", &target));
+    menu.append_section(None, &edit);
+
+    let danger = gio::Menu::new();
+    danger.append_item(&targeted_item("Delete", "win.delete-task", &target));
+    menu.append_section(None, &danger);
+
+    let popup = gtk::PopoverMenu::from_model(Some(&menu));
+    popup.set_parent(parent);
+    popup.set_has_arrow(false);
+    let unparent = popup.downgrade();
+    popup.connect_closed(move |_| {
+        if let Some(popup) = unparent.upgrade() {
+            popup.unparent();
+        }
+    });
+    popup.popup();
+}
+
+fn targeted_item(label: &str, action: &str, target: &glib::Variant) -> gio::MenuItem {
+    let item = gio::MenuItem::new(Some(label), None);
+    item.set_action_and_target_value(Some(action), Some(target));
+    item
+}
+
 fn depth_of(task: &Task, all: &[Task]) -> u32 {
     // A task with no parent is by definition top level, and is not indented.
     if !task.is_subtask() {
@@ -454,11 +1137,28 @@ mod tests {
     use crate::store::models::TaskStatus;
     use chrono::NaiveDate;
 
-    /// `visible_pane` must consult mapping, not visibility flags.
-    /// `AdwViewStack` unmaps hidden pages without clearing their flag, so a
-    /// lookup on `is_visible()` always returned the first pane and quick-add
-    /// landed in the fallback list no matter what was viewed. Mapping cannot
-    /// be exercised without a display, so this pins the lookup instead.
+    fn task(id: &str, parent: Option<&str>) -> Task {
+        Task {
+            id: id.into(),
+            title: id.into(),
+            notes: String::new(),
+            status: TaskStatus::NeedsAction,
+            due: NaiveDate::from_ymd_opt(2026, 10, 1),
+            completed: None,
+            updated: None,
+            parent: parent.map(str::to_string),
+            previous: None,
+            position: None,
+            etag: None,
+            hidden: false,
+            deleted: false,
+        }
+    }
+
+    fn pair(id: &str, parent: Option<&str>) -> (String, Task) {
+        ("@a".into(), task(id, parent))
+    }
+
     #[test]
     fn the_visible_pane_lookup_uses_mapping() {
         let source = include_str!("tasklist_view.rs");
@@ -478,22 +1178,83 @@ mod tests {
         );
     }
 
-    fn task(id: &str, parent: Option<&str>) -> Task {
-        Task {
-            id: id.into(),
-            title: id.into(),
-            notes: String::new(),
-            status: TaskStatus::NeedsAction,
-            due: NaiveDate::from_ymd_opt(2026, 10, 1),
-            completed: None,
-            updated: None,
-            parent: parent.map(str::to_string),
-            previous: None,
-            position: None,
-            etag: None,
-            hidden: false,
-            deleted: false,
-        }
+    #[test]
+    fn flat_lists_emit_no_headers() {
+        let items = build_items(
+            &[pair("a", None), pair("b", None)],
+            &[],
+            GroupMode::None,
+            "",
+            &HashSet::new(),
+        );
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.task_id().is_some()));
+    }
+
+    #[test]
+    fn due_grouping_emits_only_nonempty_sections() {
+        let items = build_items(
+            &[pair("a", None), pair("b", None)],
+            &[],
+            GroupMode::ByDue,
+            "",
+            &HashSet::new(),
+        );
+        // Both tasks are due 2026-10-01, so one section plus two tasks.
+        assert_eq!(items.len(), 3);
+        assert!(matches!(items[0], RowItem::Header { .. }));
+    }
+
+    #[test]
+    fn collapsing_a_parent_hides_its_subtasks_but_keeps_it() {
+        let ordered = vec![pair("p", None), pair("c", Some("p"))];
+        let mut collapsed = HashSet::new();
+        collapsed.insert("p".to_string());
+        let items = build_items(&ordered, &[], GroupMode::None, "", &collapsed);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].task_id(), Some("p"));
+    }
+
+    #[test]
+    fn search_prunes_tasks_and_empties_sections() {
+        let mut first = pair("a", None);
+        first.1.title = "Buy milk".into();
+        let mut second = pair("b", None);
+        second.1.title = "Write report".into();
+        let items = build_items(
+            &[first, second],
+            &[],
+            GroupMode::None,
+            "milk",
+            &HashSet::new(),
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].task_id(), Some("a"));
+    }
+
+    #[test]
+    fn by_list_sections_carry_their_own_tasks() {
+        let items = build_items(
+            &[
+                ("@a".into(), task("x", None)),
+                ("@b".into(), task("y", None)),
+            ],
+            &[
+                ("@a".into(), "First".into()),
+                ("@b".into(), "Second".into()),
+            ],
+            GroupMode::ByList,
+            "",
+            &HashSet::new(),
+        );
+        let labels: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                RowItem::Header { label } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec!["First", "Second"]);
     }
 
     #[test]
@@ -529,7 +1290,7 @@ mod tests {
 
     #[test]
     fn a_parent_cycle_terminates() {
-        // Defensive: a cycle in `parent` would otherwise loop forever while
+        // Defensive: a cycle in malformed data could otherwise loop forever while
         // rendering.
         let mut a = task("a", Some("b"));
         let mut b = task("b", Some("a"));
