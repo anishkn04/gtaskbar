@@ -10,6 +10,12 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 
 ### Fixed
 
+- **The Completed view was always empty while its badge counted tasks.** The
+  row builder filtered out completed tasks unconditionally, for every view
+  including the one place they belong. It now respects each view's
+  `include_completed`, so Completed shows its tasks and every other view
+  keeps hiding them.
+
 - **Every change threw the view back to Today.** `rebuild()` constructs a
   brand-new content stack, which always opens on its first page. A quick-add,
   checkbox toggle, drag reorder or background sync therefore yanked the user

@@ -345,7 +345,14 @@ impl TaskListView {
             })
             .collect();
 
-        let rows = build_items(&ordered, &lists, group, &search, &collapsed);
+        let rows = build_items(
+            &ordered,
+            &lists,
+            group,
+            &search,
+            &collapsed,
+            self.view.include_completed(),
+        );
 
         let selected_id = self
             .selection
@@ -582,6 +589,7 @@ fn build_items(
     group: GroupMode,
     search: &str,
     collapsed: &HashSet<String>,
+    include_completed: bool,
 ) -> Vec<RowItem> {
     // Children by parent id, so each row knows whether it can expand.
     let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -592,7 +600,10 @@ fn build_items(
     }
 
     let visible = |task: &Task| {
-        if task.is_completed() {
+        // Completed tasks are hidden everywhere except the Completed view,
+        // which is the one place they belong. Filtering them unconditionally
+        // left that view permanently empty while its badge counted them.
+        if task.is_completed() && !include_completed {
             return false;
         }
         if search.is_empty() {
@@ -1159,6 +1170,12 @@ mod tests {
         ("@a".into(), task(id, parent))
     }
 
+    fn done_pair(id: &str) -> (String, Task) {
+        let mut completed = task(id, None);
+        completed.status = crate::store::models::TaskStatus::Completed;
+        ("@a".into(), completed)
+    }
+
     #[test]
     fn the_visible_pane_lookup_uses_mapping() {
         let source = include_str!("tasklist_view.rs");
@@ -1178,6 +1195,39 @@ mod tests {
         );
     }
 
+    /// The Completed view must show completed tasks. The `visible`
+    /// closure used to filter them out unconditionally, which left the pane
+    /// permanently empty while its badge counted them.
+    #[test]
+    fn the_completed_view_shows_completed_tasks() {
+        let items = build_items(
+            &[done_pair("a"), done_pair("b")],
+            &[],
+            GroupMode::None,
+            "",
+            &HashSet::new(),
+            true,
+        );
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.task_id().is_some()));
+    }
+
+    #[test]
+    fn other_views_still_hide_completed_tasks() {
+        // `assemble` already excludes them everywhere else; this pins that the
+        // row builder agrees when told the view excludes them.
+        let items = build_items(
+            &[done_pair("a"), pair("b", None)],
+            &[],
+            GroupMode::None,
+            "",
+            &HashSet::new(),
+            false,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].task_id(), Some("b"));
+    }
+
     #[test]
     fn flat_lists_emit_no_headers() {
         let items = build_items(
@@ -1186,6 +1236,7 @@ mod tests {
             GroupMode::None,
             "",
             &HashSet::new(),
+            false,
         );
         assert_eq!(items.len(), 2);
         assert!(items.iter().all(|item| item.task_id().is_some()));
@@ -1199,6 +1250,7 @@ mod tests {
             GroupMode::ByDue,
             "",
             &HashSet::new(),
+            false,
         );
         // Both tasks are due 2026-10-01, so one section plus two tasks.
         assert_eq!(items.len(), 3);
@@ -1210,7 +1262,7 @@ mod tests {
         let ordered = vec![pair("p", None), pair("c", Some("p"))];
         let mut collapsed = HashSet::new();
         collapsed.insert("p".to_string());
-        let items = build_items(&ordered, &[], GroupMode::None, "", &collapsed);
+        let items = build_items(&ordered, &[], GroupMode::None, "", &collapsed, false);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].task_id(), Some("p"));
     }
@@ -1227,6 +1279,7 @@ mod tests {
             GroupMode::None,
             "milk",
             &HashSet::new(),
+            false,
         );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].task_id(), Some("a"));
@@ -1246,6 +1299,7 @@ mod tests {
             GroupMode::ByList,
             "",
             &HashSet::new(),
+            false,
         );
         let labels: Vec<_> = items
             .iter()
