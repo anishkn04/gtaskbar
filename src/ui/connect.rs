@@ -42,7 +42,43 @@ fn present_for_standalone() {
         .default_height(620)
         .build();
     build_dialog(&dialog);
+    track_dialog(&dialog);
     dialog.present();
+}
+
+thread_local! {
+    /// The live connect dialog, if one is open.
+    ///
+    /// Tracked so a successful browser sign-in can close it: otherwise the
+    /// popup lingers on top of the now-connected app and has to be dismissed
+    /// by hand.
+    static CONNECT_DIALOG: RefCell<Option<adw::Window>> = const { RefCell::new(None) };
+}
+
+use std::cell::RefCell;
+
+/// Remembers the dialog until it is closed by the user or by a sign-in.
+fn track_dialog(dialog: &adw::Window) {
+    CONNECT_DIALOG.with(|slot| *slot.borrow_mut() = Some(dialog.clone()));
+    let weak = dialog.downgrade();
+    dialog.connect_close_request(move |_| {
+        if weak.upgrade().is_some() {
+            CONNECT_DIALOG.with(|slot| slot.borrow_mut().take());
+        }
+        glib::Propagation::Proceed
+    });
+}
+
+/// Closes the connect dialog, if one is open.
+///
+/// Called on a successful sign-in: the browser already said its piece, and the
+/// window behind has been rebuilt around the connected account.
+pub fn close_dialog() {
+    CONNECT_DIALOG.with(|slot| {
+        if let Some(dialog) = slot.borrow_mut().take() {
+            dialog.close();
+        }
+    });
 }
 
 pub fn present_for(parent: &gtk::Window) {
@@ -55,6 +91,7 @@ pub fn present_for(parent: &gtk::Window) {
         .build();
 
     build_dialog(&dialog);
+    track_dialog(&dialog);
     dialog.present();
 }
 
@@ -299,6 +336,10 @@ fn start_authorisation(button: gtk::Button) {
                     // looks like it did nothing.
                     match crate::running_app() {
                         Some(app) => {
+                            // The browser already said its piece: dismiss the
+                            // dialog so the rebuilt, connected window is what
+                            // the user comes back to.
+                            close_dialog();
                             crate::ui::window::rebuild(&app);
                             crate::sync::scheduler::request_sync(&app);
                         }

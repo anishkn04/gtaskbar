@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Every change threw the view back to Today.** `rebuild()` constructs a
+  brand-new content stack, which always opens on its first page. A quick-add,
+  checkbox toggle, drag reorder or background sync therefore yanked the user
+  out of whatever list they were viewing. The visible view is now captured
+  before the rebuild and restored afterwards, sidebar selection included; a
+  view that no longer exists falls back to the first page instead of forcing
+  a wrong one.
+- **The connect dialog lingered after signing in.** A successful browser
+  sign-in rebuilt the window behind the dialog but never dismissed it. It now
+  closes on success; failures keep it open for retry.
+
 ## [0.1.0] - 2026-10-03
 
 ### Added

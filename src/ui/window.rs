@@ -132,6 +132,12 @@ pub fn rebuild(app: &adw::Application) {
         return;
     };
 
+    // A rebuild constructs a brand-new content stack, which always opens on
+    // its first page (Today). Capture the visible view first and restore it
+    // afterwards, or every sync, toggle and drag throws the user back to
+    // Today no matter what they were looking at.
+    let current = visible_content_view(&window.clone().upcast());
+
     let config = Config::load();
     let root = build_ui(&config);
 
@@ -143,9 +149,13 @@ pub fn rebuild(app: &adw::Application) {
         .and_then(|c| c.downcast_ref::<adw::ToastOverlay>())
     {
         overlay.set_child(Some(&root));
-        return;
+    } else {
+        window.set_content(Some(&root));
     }
-    window.set_content(Some(&root));
+
+    if let Some(name) = current {
+        restore_content_view(&window.clone().upcast(), &name);
+    }
 }
 
 thread_local! {
@@ -341,6 +351,9 @@ fn build_ui(_config: &Config) -> adw::NavigationSplitView {
         .build();
 
     let content_stack = adw::ViewStack::new();
+    // Marks the outer content stack so `rebuild` can tell it apart from the
+    // per-pane list/empty stacks when restoring the visible view.
+    content_stack.set_widget_name(CONTENT_STACK);
 
     // Smart views first, then each account's own lists.
     let mut views: Vec<crate::model::view::View> = vec![
@@ -413,6 +426,89 @@ fn build_ui(_config: &Config) -> adw::NavigationSplitView {
     root.set_content(Some(&content_page));
     root.set_sidebar(Some(&build_sidebar_page(&sidebar_list, &snap)));
     root
+}
+
+/// Widget name marking the outer content stack, so the per-pane list/empty
+/// stacks are never mistaken for it when the visible view is preserved.
+const CONTENT_STACK: &str = "gtaskbar-content-stack";
+
+/// The name of the currently visible content page, if the window has one.
+///
+/// `build_ui` reconstructs the whole split view, so `rebuild` reads this
+/// beforehand and restores it afterwards; without that the new stack always
+/// opens on its first page.
+fn visible_content_view(window: &gtk::Window) -> Option<String> {
+    let stack = find_content_stack(window)?;
+    stack.visible_child_name().map(|name| name.to_string())
+}
+
+/// Switches the fresh content stack and sidebar back to a preserved view.
+///
+/// A name with no matching page is refused rather than forced: the list may
+/// have been deleted since the name was captured.
+fn restore_content_view(window: &gtk::Window, name: &str) {
+    let Some(stack) = find_content_stack(window) else {
+        return;
+    };
+    if stack.child_by_name(name).is_none() {
+        return;
+    }
+    stack.set_visible_child_name(name);
+    select_sidebar_row(window, name);
+}
+
+/// Selects the sidebar row for a view, keeping it in step with the content.
+fn select_sidebar_row(window: &gtk::Window, name: &str) {
+    let mut all = Vec::new();
+    if let Some(content) = window
+        .downcast_ref::<adw::ApplicationWindow>()
+        .and_then(|w| w.content())
+    {
+        collect_widgets(&content.upcast(), &mut all);
+    }
+    let Some(list) = all.iter().find_map(|widget| {
+        widget
+            .downcast_ref::<gtk::ListBox>()
+            .filter(|list| list.has_css_class("gtaskbar-sidebar"))
+    }) else {
+        return;
+    };
+    let mut row = list.first_child();
+    while let Some(candidate) = row {
+        if let Some(list_row) = candidate.downcast_ref::<gtk::ListBoxRow>() {
+            if list_row.widget_name() == name {
+                list.select_row(Some(list_row));
+                return;
+            }
+        }
+        row = candidate.next_sibling();
+    }
+}
+
+/// The outer content stack, if the window has been built already.
+fn find_content_stack(window: &gtk::Window) -> Option<adw::ViewStack> {
+    let mut all = Vec::new();
+    if let Some(content) = window
+        .downcast_ref::<adw::ApplicationWindow>()
+        .and_then(|w| w.content())
+    {
+        collect_widgets(&content.upcast(), &mut all);
+    }
+    all.into_iter().find_map(|widget| {
+        widget
+            .downcast::<adw::ViewStack>()
+            .ok()
+            .filter(|stack| stack.widget_name() == CONTENT_STACK)
+    })
+}
+
+fn collect_widgets(widget: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
+    out.push(widget.clone());
+    let mut child = widget.first_child();
+    while let Some(next) = child {
+        collect_widgets(&next, out);
+        child = next.next_sibling();
+    }
 }
 
 /// The state banner for the content panes, if any condition needs one.
