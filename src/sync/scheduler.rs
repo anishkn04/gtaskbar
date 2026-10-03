@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
+use gtk::gio::prelude::NetworkMonitorExt;
 use gtk::glib;
 use gtk::prelude::*;
 
@@ -24,6 +25,16 @@ thread_local! {
     /// Whether a tray icon is actually registered, so closing the window knows
     /// whether hiding somewhere is safe.
     static HAS_TRAY: RefCell<bool> = const { RefCell::new(true) };
+    /// The last sync failure, for the banner. Cleared by the next success, so
+    /// a transient failure does not lecture forever.
+    static LAST_SYNC_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Whether the account needs reconnecting. Set when the API rejects the
+    /// credentials and cleared by any successful pass; drives the banner, so
+    /// a dead token is visible instead of a perpetually stale list.
+    static NEEDS_REAUTH: RefCell<bool> = const { RefCell::new(false) };
+    /// Whether the network monitor is hooked up. Connected once per process;
+    /// it rebuilds on connectivity changes so banners track reality.
+    static MONITOR_HOOKED: RefCell<bool> = const { RefCell::new(false) };
 }
 
 thread_local! {
@@ -91,6 +102,7 @@ pub fn init(app: &adw::Application, window: Option<&gtk::Window>, config: &Confi
         WINDOW.with(|w| *w.borrow_mut() = Some(window.clone()));
     }
     open_store();
+    hook_network_monitor();
 
     // Start the background runtime the sync worker runs on. It is created and
     // owned here so its lifetime is tied to the main loop.
@@ -346,6 +358,7 @@ fn spawn_sync(app: adw::Application) {
                 match rx.try_recv() {
                     Ok(outcome) => {
                         SYNCING.with(|flag| *flag.borrow_mut() = false);
+                        record_outcome(&outcome);
                         let (message, is_error) = describe(&outcome);
                         if is_error {
                             log::warn!("{message}");
@@ -467,10 +480,69 @@ fn restore_session() {
             }
             Ok(Err(message)) => {
                 log::warn!("could not restore the session: {message}");
+                // A failed restore with a working network means the stored
+                // token is dead rather than unreachable: surface reconnect
+                // instead of retrying a doomed refresh every poll.
+                if online() {
+                    NEEDS_REAUTH.with(|flag| *flag.borrow_mut() = true);
+                }
                 glib::ControlFlow::Break
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+        });
+    });
+}
+
+/// Records a sync outcome for the banner.
+///
+/// A success clears both the error and the reauth flag: talking to Google at
+/// all proves the credentials work. A failure records its message; one that
+/// needs user action additionally raises the reconnect flag.
+pub fn record_outcome(outcome: &Result<engine::SyncReport, engine::SyncError>) {
+    match outcome {
+        Ok(_) => {
+            LAST_SYNC_ERROR.with(|slot| *slot.borrow_mut() = None);
+            NEEDS_REAUTH.with(|flag| *flag.borrow_mut() = false);
+        }
+        Err(err) => {
+            LAST_SYNC_ERROR.with(|slot| *slot.borrow_mut() = Some(err.to_string()));
+            if err.needs_user_action() {
+                NEEDS_REAUTH.with(|flag| *flag.borrow_mut() = true);
+            }
+        }
+    }
+}
+
+/// The last sync failure, if the latest pass did not succeed.
+pub fn last_sync_error() -> Option<String> {
+    LAST_SYNC_ERROR.with(|slot| slot.borrow().clone())
+}
+
+/// Whether the account needs reconnecting.
+pub fn needs_reauth() -> bool {
+    NEEDS_REAUTH.with(|flag| *flag.borrow())
+}
+
+/// Whether the network looks usable right now.
+pub fn online() -> bool {
+    gtk::gio::NetworkMonitor::default().connectivity() == gtk::gio::NetworkConnectivity::Full
+}
+
+/// Rebuilds on connectivity changes so banners track reality.
+///
+/// Connected once per process: the monitor outlives any window, and every
+/// change only needs the newest UI.
+pub fn hook_network_monitor() {
+    MONITOR_HOOKED.with(|done| {
+        if *done.borrow() {
+            return;
+        }
+        *done.borrow_mut() = true;
+        gtk::gio::NetworkMonitor::default().connect_network_changed(|_, _| {
+            if let Some(app) = crate::running_app() {
+                crate::ui::window::rebuild(&app);
+            }
         });
     });
 }

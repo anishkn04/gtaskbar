@@ -60,6 +60,29 @@ pub fn present(app: &adw::Application) {
     behaviour.add(&close_to_tray_row());
     page.add(&behaviour);
 
+    let priority = adw::PreferencesGroup::builder()
+        .title("Task priority")
+        .description(
+            "Google Tasks has no priority field, so the Priority sort derives one. Lower sorts first.",
+        )
+        .build();
+    for (signal, score) in [
+        ("Overdue", "0"),
+        ("Due today", "1"),
+        ("Due within 3 days", "2"),
+        ("Later, or no due date", "3"),
+        ("Each: has notes, has open subtasks", "+1"),
+    ] {
+        let row = adw::ActionRow::builder().title(signal).build();
+        let badge = gtk::Label::builder().label(score).build();
+        badge.add_css_class("gtaskbar-badge");
+        badge.set_valign(gtk::Align::Center);
+        row.add_suffix(&badge);
+        row.set_activatable(false);
+        priority.add(&row);
+    }
+    page.add(&priority);
+
     dialog.add(&page);
     OPEN.with(|slot| *slot.borrow_mut() = Some(dialog.clone()));
     dialog.present(parent.as_ref());
