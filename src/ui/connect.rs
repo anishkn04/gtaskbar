@@ -158,7 +158,9 @@ fn build_dialog(dialog: &adw::Window) {
     // Deliberately empty: a real client id must never be baked into the source.
     // `GTASKBAR_CLIENT_ID` / `GTASKBAR_CLIENT_SECRET` prefill these for local
     // development, and the OAuth step will persist what is entered here.
-    let (env_id, env_secret) = credentials_from_env()
+    // Pre-fill from the keyring (or the environment, which takes precedence),
+    // so a returning user does not retype what is already stored.
+    let (env_id, env_secret) = ClientCredentials::load()
         .map(|credentials| (credentials.client_id, credentials.client_secret))
         .unwrap_or_default();
 
@@ -403,20 +405,11 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
-/// Reads client credentials from the environment, for development.
-pub fn credentials_from_env() -> Option<ClientCredentials> {
-    credentials_from(
-        std::env::var("GTASKBAR_CLIENT_ID").ok(),
-        std::env::var("GTASKBAR_CLIENT_SECRET").ok(),
-    )
-}
-
 /// The credential rules, as a pure function.
 ///
-/// Split out from `credentials_from_env` so the rules are testable without
-/// touching the process environment, which is shared state: a test that called
-/// `set_var` would race every other test in the binary, and would also wipe the
-/// developer's real credentials when they run the suite with `.env` loaded.
+/// Split out so the rules are testable without touching the process
+/// environment, which is shared state.
+#[cfg(test)]
 fn credentials_from(id: Option<String>, secret: Option<String>) -> Option<ClientCredentials> {
     let id = id?;
     let secret = secret?;
