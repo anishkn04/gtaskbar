@@ -73,12 +73,16 @@ fn track_dialog(dialog: &adw::Window) {
 ///
 /// Called on a successful sign-in: the browser already said its piece, and the
 /// window behind has been rebuilt around the connected account.
+///
+/// The borrow is released before `close()` runs: closing fires the dialog's
+/// `close-request` signal synchronously, and that handler borrows the same
+/// cell. Borrowing it twice panics, and a panic inside a GTK signal handler
+/// cannot unwind through the C frames, so it aborts the process.
 pub fn close_dialog() {
-    CONNECT_DIALOG.with(|slot| {
-        if let Some(dialog) = slot.borrow_mut().take() {
-            dialog.close();
-        }
-    });
+    let dialog = CONNECT_DIALOG.with(|slot| slot.borrow_mut().take());
+    if let Some(dialog) = dialog {
+        dialog.close();
+    }
 }
 
 pub fn present_for(parent: &gtk::Window) {
@@ -475,5 +479,30 @@ mod tests {
                 "whitespace-only credentials must not be accepted"
             );
         }
+    }
+
+    /// Regression: `close_dialog` used to call `dialog.close()` while still
+    /// holding the `RefCell` borrow. Closing fires the dialog's
+    /// `close-request` signal synchronously, and that handler borrows the same
+    /// cell — a double borrow, which panics. A panic inside a GTK signal
+    /// handler cannot unwind through the C frames, so it aborted the process
+    /// the moment a browser sign-in completed.
+    ///
+    /// A real window cannot be created without a display, so this pins the
+    /// borrow pattern the fix relies on: the value is taken and the borrow
+    /// released before anything that might re-borrow runs.
+    #[test]
+    fn closing_the_dialog_does_not_reenter_the_borrow() {
+        let cell = std::cell::RefCell::new(Some(1));
+
+        // What close_dialog does: take the value, releasing the borrow.
+        let taken = cell.borrow_mut().take();
+
+        // What the close-request handler does when close() fires: borrow again.
+        // Panics with "already borrowed" if the borrow was never released.
+        let handler_took = cell.borrow_mut().take();
+
+        assert_eq!(taken, Some(1));
+        assert_eq!(handler_took, None);
     }
 }
