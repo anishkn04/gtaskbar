@@ -367,6 +367,154 @@ impl SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    /// A scripted stub of the Tasks API: first PATCH fails with 412, then a
+    /// GET serves the fresh copy, then the retried PATCH succeeds. Drives the
+    /// ETag-conflict rebase path without touching the network.
+    struct Stub {
+        port: u16,
+    }
+
+    impl Stub {
+        fn start() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+            let port = listener.local_addr().expect("stub port").port();
+            std::thread::spawn(move || {
+                let mut patches = 0;
+                for stream in listener.incoming().take(3) {
+                    let Ok(mut stream) = stream else { continue };
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone stub"));
+                    let mut head = String::new();
+                    if reader.read_line(&mut head).unwrap_or(0) == 0 {
+                        continue;
+                    }
+                    let mut length = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        if line.trim().is_empty() {
+                            break;
+                        }
+                        if let Some(value) = line.strip_prefix("Content-Length:") {
+                            length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let mut body = vec![0u8; length];
+                    if length > 0 {
+                        use std::io::Read;
+                        let _ = reader.read_exact(&mut body);
+                    }
+                    drop(reader);
+
+                    let (status, payload) = if head.starts_with("PATCH") {
+                        patches += 1;
+                        if patches == 1 {
+                            ("412 Precondition Failed", String::new())
+                        } else {
+                            ("200 OK", task_json("Patched title", "server-etag-2"))
+                        }
+                    } else {
+                        ("200 OK", task_json("Fresh from server", "server-etag-1"))
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self { port }
+        }
+
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+    }
+
+    fn task_json(title: &str, etag: &str) -> String {
+        format!(r#"{{"id":"t1","title":"{title}","status":"needsAction","etag":"{etag}"}}"#)
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
+    /// A 412 on patch fetches the server copy and retries once with its etag,
+    /// caching the retried response: the local change survives a concurrent
+    /// remote edit instead of failing the sync.
+    #[test]
+    fn a_conflict_rebases_and_retries_rather_than_failing() {
+        let stub = Stub::start();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = format!("{}", dir.path().join("cache.db").display());
+        let store = Store::open(std::path::Path::new(&cache)).expect("open store");
+        store
+            .upsert_task_lists(&[crate::store::models::TaskList {
+                id: "L".into(),
+                title: "List".into(),
+                updated: None,
+                etag: None,
+            }])
+            .expect("seed list");
+        store
+            .upsert_tasks(
+                "L",
+                &[crate::store::models::Task {
+                    id: "t1".into(),
+                    title: "Local title".into(),
+                    notes: String::new(),
+                    status: crate::store::models::TaskStatus::NeedsAction,
+                    due: None,
+                    completed: None,
+                    updated: None,
+                    parent: None,
+                    previous: None,
+                    position: None,
+                    etag: Some("stale-etag".into()),
+                    hidden: false,
+                    deleted: false,
+                }],
+            )
+            .expect("seed task");
+
+        let patch = crate::store::models::TaskPatch {
+            title: Some("Local title".into()),
+            ..crate::store::models::TaskPatch::default()
+        };
+        let op = crate::store::PendingOp {
+            id: 1,
+            list_id: "L".into(),
+            task_id: Some("t1".into()),
+            kind: crate::store::PendingOpKind::Patch,
+            payload: serde_json::to_string(&patch).expect("serialise patch"),
+            attempts: 0,
+            last_error: None,
+        };
+
+        let mut client =
+            TasksClient::new_with_base("fake-token".into(), stub.url()).expect("stub client");
+        block_on(replay(std::path::Path::new(&cache), &mut client, &op))
+            .expect("the rebase should succeed");
+
+        let task = store
+            .task("L", "t1")
+            .expect("read back")
+            .expect("task still cached");
+        assert_eq!(
+            task.etag.as_deref(),
+            Some("server-etag-2"),
+            "the cache must hold the retried response, not the stale copy"
+        );
+        assert_eq!(task.title, "Patched title");
+    }
 
     #[test]
     fn an_auth_error_is_treated_as_needing_user_action() {

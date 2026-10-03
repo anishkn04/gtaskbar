@@ -52,12 +52,21 @@ impl ApiError {
 pub struct TasksClient {
     http: reqwest::Client,
     token: String,
+    base_url: String,
     queries_today: u32,
     day_started: chrono::NaiveDate,
 }
 
 impl TasksClient {
     pub fn new(token: String) -> Result<Self> {
+        Self::new_with_base(token, BASE_URL.to_string())
+    }
+
+    /// Builds a client against another root. Production code always uses
+    /// `new`; this exists so tests can point the client at a stub server and
+    /// exercise the real request/response handling, including the ETag-conflict
+    /// rebase path, without touching the network.
+    pub fn new_with_base(token: String, base_url: String) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(concat!("gtaskbar/", env!("CARGO_PKG_VERSION")))
@@ -66,6 +75,7 @@ impl TasksClient {
         Ok(Self {
             http,
             token,
+            base_url,
             queries_today: 0,
             day_started: chrono::Local::now().date_naive(),
         })
@@ -100,7 +110,7 @@ impl TasksClient {
         self.spend_query()
             .map_err(|err| ApiError::Network(err.to_string()))?;
 
-        let url = format!("{BASE_URL}{}", endpoint.path(path_args));
+        let url = format!("{}{}", self.base_url, endpoint.path(path_args));
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -347,6 +357,16 @@ impl TasksClient {
         task_id: &str,
         request: &super::convert::MoveRequest,
     ) -> Result<Task, ApiError> {
+        // `destinationTasklist` is a query parameter on tasks.move, not a body
+        // field: sent in the body, Google silently ignores it and the task
+        // stays where it is. `parent` and `previous` are body fields.
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(dest) = &request.destination_tasklist {
+            query.push(("destinationTasklist", dest.clone()));
+        }
+        let mut body_request = request.clone();
+        body_request.destination_tasklist = None;
+
         let response = self
             .send(
                 Method::POST,
@@ -356,9 +376,9 @@ impl TasksClient {
                     task: Some(task_id.to_string()),
                     ..Default::default()
                 },
-                &[],
+                &query,
                 None,
-                Some(serde_json::to_value(request).map_err(|err| {
+                Some(serde_json::to_value(body_request).map_err(|err| {
                     ApiError::Network(format!("could not serialise move: {err}"))
                 })?),
             )
